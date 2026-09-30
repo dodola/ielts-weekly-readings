@@ -246,7 +246,7 @@ async function main() {
       await reserve('codexReserved', 1, maxCodex);
       const schemaPath = path.join(jobDir, `${output}.schema.json`);
       await save(schemaPath, schema);
-      await command(codex, ['exec', '--ephemeral', '--sandbox', 'workspace-write', '--skip-git-repo-check',
+      await command(codex, ['exec', '--model', 'gpt-6.1-sol', '--config', 'model_reasoning_effort="high"', '--ephemeral', '--sandbox', 'workspace-write', '--skip-git-repo-check',
         '-C', jobDir, '--output-schema', schemaPath, '--output-last-message', path.join(jobDir, output),
         ...images.flatMap(p => ['-i', p]), '-'],
         { cwd: jobDir, env: safeEnv, input: prompt, timeout: 25 * 60000, log: path.join(jobDir, `${output}.codex.log`) });

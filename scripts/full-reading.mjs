@@ -61,7 +61,7 @@ export async function createFullGuide(options) {
     `No page/word limit: completeness matters. Persist the skeleton first, then write each block to disk in manageable chunks (about 100–250 lines per edit), as the skill requires. If an existing guide.md exists, inspect it and repair/continue rather than deleting completed content. Finish by self-checking the IELTS template checklist and exact paragraph/English/Chinese coverage. Return a short completion message only.`;
   async function draft(extra = '', logName = 'full-generation.codex.log') {
     await reserve('codexReserved', 1, maxCodex);
-    await command(codex, ['exec', '--ephemeral', '--sandbox', 'workspace-write', '--skip-git-repo-check',
+    await command(codex, ['exec', '--model', 'gpt-6.1-sol', '--config', 'model_reasoning_effort="high"', '--ephemeral', '--sandbox', 'workspace-write', '--skip-git-repo-check',
       '-C', jobDir, '--output-last-message', path.join(jobDir, 'generation-result.txt'), '-'],
       { cwd: jobDir, env: safeEnv, input: `${prompt}\n${extra}`, timeout: 45 * 60000,
         log: path.join(jobDir, logName) });
