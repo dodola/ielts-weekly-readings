@@ -8,6 +8,8 @@ import os from 'node:os';
 import { readFile, writeFile, mkdir, rename, stat, open, unlink, copyFile, readdir } from 'node:fs/promises';
 import { windowFor, issuesInWindow, sourceURL, digest, auditSchema, publicMetadata, assertPrivateSnapshot } from './notes.mjs';
 import { FULL_POLICY, createFullGuide } from './full-reading.mjs';
+import { serialQueue, runBounded } from './concurrency.mjs';
+import { randomUUID } from 'node:crypto';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const HELP = `Usage: node scripts/weekly.mjs --project PATH --source PATH --output-repo PATH [--execute --publish]
@@ -15,12 +17,13 @@ const HELP = `Usage: node scripts/weekly.mjs --project PATH --source PATH --outp
 Every online run safely fast-forward updates the exact --source checkout first.
 Default: refresh + private dry-run; no AI calls, no commit, no push.
 --execute              Analyze all candidates; generate up to 10 selected guides.
---publish              Commit/push validated public artifacts (requires --execute).
+--publish              Commit/push validated PRIVATE artifacts (requires --execute).
 --offline              Local-only dry-run; cannot execute or publish.
 --date YYYY-MM-DD      Beijing run date, for reproducible backfill/verification.
 --from YYYY-MM-DD --to YYYY-MM-DD  Explicit inclusive issue-date range (max 31 days).
 --max-articles N       Optional candidate cap; default covers all candidates.
 --max-guides N         Selected guide cap (default 10, maximum 10).
+--generation-concurrency N  Independent guide workers (default 2, maximum 2); Git is serial.
 --max-codex-calls N    Generation + review reservations per date range (default 40).
 --skill-root PATH     Installed intensive-reading skill.
 --source-links PATH   Private JSON mapping issueId/articleId -> verified publisher URL.
@@ -37,9 +40,9 @@ const privateRoot = path.join(root, '.private');
 const cache = path.join(privateRoot, 'cache');
 let outputRoot = path.join(privateRoot, 'library');
 let publicRoot = path.join(outputRoot, 'readings');
-let active = null;
+const active = new Set();
 const stop = () => {
-  if (active) { try { process.kill(-active.pid, 'SIGTERM'); } catch {} }
+  for (const child of active) { try { process.kill(-child.pid, 'SIGTERM'); } catch {} }
 };
 for (const s of ['SIGINT', 'SIGTERM']) process.on(s, () => { stop(); process.exit(130); });
 
@@ -47,14 +50,15 @@ async function exists(p) { try { await stat(p); return true; } catch (e) { if (e
 async function json(p) { return JSON.parse(await readFile(p, 'utf8')); }
 async function save(p, value) {
   await mkdir(path.dirname(p), { recursive: true, mode: 0o700 });
-  const temporary = `${p}.${process.pid}.tmp`;
+  const temporary = `${p}.${process.pid}.${randomUUID()}.tmp`;
   await writeFile(temporary, typeof value === 'string' ? value : `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
   await rename(temporary, p);
 }
 async function command(binary, args, { cwd = root, env = process.env, input, timeout = 120000, log } = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(binary, args, { cwd, env, detached: true, stdio: ['pipe', 'pipe', 'pipe'] });
-    active = child;
+    active.add(child);
+    const startedAt = new Date();
     let out = '', err = '', ended = false;
     const timer = setTimeout(() => {
       ended = true;
@@ -62,14 +66,19 @@ async function command(binary, args, { cwd = root, env = process.env, input, tim
       setTimeout(() => { try { process.kill(-child.pid, 'SIGKILL'); } catch {} }, 3000).unref();
       reject(new Error(`${path.basename(binary)} timed out; private intermediate files retained.`));
     }, timeout);
-    child.on('error', e => { clearTimeout(timer); active = null; reject(e); });
+    child.on('error', e => { clearTimeout(timer); active.delete(child); reject(e); });
     child.stdout.on('data', b => { out += b; });
     child.stderr.on('data', b => { err += b; });
     child.stdin.on('error', () => {});
     child.stdin.end(input);
     child.on('close', async code => {
-      clearTimeout(timer); active = null;
-      if (log) await save(log, `${out}\n${err}`).catch(() => {});
+      clearTimeout(timer); active.delete(child);
+      if (log) {
+        await save(log, `${out}\n${err}`).catch(() => {});
+        const finishedAt = new Date();
+        await save(`${log}.timing.json`, { command: path.basename(binary), startedAt: startedAt.toISOString(),
+          finishedAt: finishedAt.toISOString(), durationMs: finishedAt - startedAt, exitCode: code }).catch(() => {});
+      }
       if (ended) return;
       // Raw SDK/Codex output stays private. Never echo untrusted error bodies.
       if (code !== 0) reject(new Error(`${path.basename(binary)} failed (exit ${code}); inspect private logs locally.`));
@@ -113,7 +122,7 @@ async function main() {
     help: { type: 'boolean' }, project: { type: 'string' }, source: { type: 'string' },
     execute: { type: 'boolean' }, publish: { type: 'boolean' }, offline: { type: 'boolean' },
     date: { type: 'string' }, from: { type: 'string' }, to: { type: 'string' }, 'max-articles': { type: 'string' }, 'max-guides': { type: 'string' },
-    'max-codex-calls': { type: 'string' },
+    'max-codex-calls': { type: 'string' }, 'generation-concurrency': { type: 'string' },
     'skill-root': { type: 'string' }, 'source-links': { type: 'string' },
     'no-documents': { type: 'boolean' }, repository: { type: 'string' }, 'output-repo': { type: 'string' }, mode: { type: 'string' },
   } });
@@ -127,6 +136,7 @@ async function main() {
   const skill = path.resolve(v['skill-root'] ?? path.join(os.homedir(), '.codex/skills/intensive-reading'));
   const maxArticles = int(v['max-articles'], Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER), maxGuides = int(v['max-guides'], 10, 10);
   const maxCodex = int(v['max-codex-calls'], 40, 40);
+  const generationConcurrency = int(v['generation-concurrency'], 2, 2);
   const repository = v.repository ?? 'dodola/ielts-reading-library';
   outputRoot = path.resolve(v['output-repo'] ?? outputRoot);
   if (outputRoot === root) throw new Error('Artifact checkout must be separate from the public workflow code.');
@@ -183,7 +193,7 @@ async function main() {
       if (tasks.length >= maxArticles) break;
     }
     const report = { schemaVersion: 1, policy: FULL_POLICY, mode: 'full-ielts', window, refresh,
-      limits: { maxArticles: v['max-articles'] ? maxArticles : 'all', maxGuides, maxCodexCalls: maxCodex,
+      limits: { maxArticles: v['max-articles'] ? maxArticles : 'all', maxGuides, maxCodexCalls: maxCodex, generationConcurrency,
         typeSafeBudget: 'unlimited-by-user-instruction', retriesPerRequest: 2, timeoutMinutes: 240 },
       issues: issues.map(({ id, publication, issueDate }) => ({ id, publication, issueDate })),
       candidates: tasks.map(t => ({ issueId: t.issue.id, articleId: t.article.id,
@@ -219,10 +229,11 @@ async function main() {
     }
     const ledgerPath = path.join(runDir, 'budget.json');
     let ledger = await exists(ledgerPath) ? await json(ledgerPath) : { typeSafeReserved: 0, codexReserved: 0 };
-    async function reserve(kind, count, limit) {
+    const reserveSerial = serialQueue();
+    async function reserve(kind, count, limit) { return reserveSerial(async () => {
       if (ledger[kind] + count > limit) throw new Error(`Persistent per-date ${kind} budget exhausted; stopped.`);
       ledger[kind] += count; await save(ledgerPath, ledger);
-    }
+    }); }
     const req = createRequire(path.join(project, 'package.json'));
     const AdmZip = req('adm-zip'); const cheerio = req('cheerio');
     const sourceLinks = v['source-links'] ? await json(path.resolve(v['source-links'])) : {};
@@ -259,8 +270,9 @@ async function main() {
     report.selectedCount = selected.length;
     await save(path.join(runDir, 'report.json'), report);
     report.blockedArticles = [];
+    const pending = [];
     for (const t of selected.sort((a, b) => b.analysis.compositeScore - a.analysis.compositeScore)) {
-      if (report.guides.length >= maxGuides) break;
+      if (report.guides.length + pending.length >= maxGuides) break;
       const analysis = t.analysis;
       const dataset = await json(path.join(cache, 'issues', `${t.issue.id}.json`));
       const article = dataset.articles.find(a => a.id === t.article.id);
@@ -296,9 +308,18 @@ async function main() {
           continue;
         }
       }
-      console.log(`Generating/reusing COMPLETE IELTS guide ${report.guides.length + 1}/${maxGuides}: ${article.title}…`);
-      const full = await createFullGuide({ jobDir, article, skill, codex, safeEnv, command, generate,
+      pending.push({ t, article, metadata, contentHash, jobDir, finalDir });
+    }
+    const completeSerial = serialQueue();
+    const buildSerial = serialQueue();
+    const guideCommand = (binary, args, options) => binary === 'bash' && args[0] === path.join(skill, 'scripts/build.sh')
+      ? buildSerial(() => command(binary, args, options)) : command(binary, args, options);
+    const alreadyCompleted = report.guides.length;
+    await runBounded(pending, generationConcurrency, async ({ t, article, metadata, contentHash, jobDir, finalDir }, index) => {
+      console.log(`Generating/reusing COMPLETE IELTS guide ${alreadyCompleted + index + 1}/${maxGuides}: ${article.title}…`);
+      const full = await createFullGuide({ jobDir, article, skill, codex, safeEnv, command: guideCommand, generate,
         reserve, maxCodex, noDocuments: v['no-documents'] });
+      await completeSerial(async () => {
       const artifactFiles = [...full.artifactFiles];
       await mkdir(finalDir, { recursive: true });
       for (const f of artifactFiles) await copyFile(path.join(jobDir, f), path.join(finalDir, f));
@@ -312,7 +333,8 @@ async function main() {
       report.guides.push({ issueId: t.issue.id, articleId: article.id, state: 'generated', sourceUrl: metadata.sourceUrl });
       await save(path.join(runDir, 'report.json'), report);
       if (v.publish) await publish(repository, runDir, window.end);
-    }
+      });
+    });
     report.status = report.guides.length ? 'completed' : 'no-selected-articles';
     report.budget = ledger;
     await save(path.join(runDir, 'report.json'), report);
