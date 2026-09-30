@@ -34,12 +34,14 @@ const strings = { type: 'array', items: string };
 export const noteSchema = object({
   chineseTitle: string, question: string, overview: string,
   quotation: object({ text: string, translation: string }),
-  expressions: { type: 'array', items: object({
+  expressions: { type: 'array', minItems: 1, maxItems: 3, items: object({
     expression: string, meaning: string, authorTechnique: string,
     grade: { type: 'string', enum: ['direct', 'optional', 'partial', 'reading-only'] },
-    ieltsAdvice: string, alternative: string, collocations: strings, examples: strings,
+    ieltsAdvice: string, alternative: string,
+    collocations: { ...strings, minItems: 3, maxItems: 3 },
+    examples: { ...strings, minItems: 2, maxItems: 2 },
   }) },
-  arguments: { type: 'array', items: object({ heading: string, commentary: string, logic: string }) },
+  arguments: { type: 'array', minItems: 2, maxItems: 3, items: object({ heading: string, commentary: string, logic: string }) },
   criticalReading: string, conclusion: string,
 });
 export const auditSchema = object({ approved: { type: 'boolean' }, reasons: strings });
