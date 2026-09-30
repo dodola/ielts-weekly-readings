@@ -340,9 +340,15 @@ async function main() {
       }
       await mkdir(finalDir, { recursive: true });
       for (const f of artifactFiles) await copyFile(path.join(jobDir, f), path.join(finalDir, f));
+      const provenance = async file => {
+        const log = await readFile(path.join(jobDir, file), 'utf8');
+        return { model: log.match(/^model:\s+(.+)$/m)?.[1] ?? 'unavailable',
+          reasoningEffort: log.match(/^reasoning effort:\s+(.+)$/m)?.[1] ?? 'unavailable' };
+      };
       await save(path.join(finalDir, 'metadata.json'), { ...metadata, contentHash, quoteBudget,
         artifacts: artifactFiles, artifactHashes: Object.fromEntries(await Promise.all(artifactFiles.map(async f =>
-          [f, digest(await readFile(path.join(finalDir, f)))]))), independentReview: 'approved' });
+          [f, digest(await readFile(path.join(finalDir, f)))]))), independentReview: 'approved',
+        generation: await provenance('note.json.codex.log'), review: await provenance('audit.json.codex.log') });
       report.guides.push({ issueId: t.issue.id, articleId: article.id, state: 'generated', sourceUrl: metadata.sourceUrl });
       await save(path.join(runDir, 'report.json'), report);
     }
