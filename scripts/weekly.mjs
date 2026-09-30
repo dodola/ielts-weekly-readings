@@ -278,9 +278,13 @@ async function main() {
       await mkdir(jobDir, { recursive: true, mode: 0o700 });
       await save(path.join(jobDir, 'source.json'), { article, metadata });
       const finalDir = path.join(publicRoot, t.issue.id, article.id);
-      if (await exists(path.join(finalDir, 'metadata.json')) && (await json(path.join(finalDir, 'metadata.json'))).contentHash === contentHash) {
-        report.guides.push({ issueId: t.issue.id, articleId: article.id, state: 'already-published' });
-        continue;
+      if (await exists(path.join(finalDir, 'metadata.json'))) {
+        const previous = await json(path.join(finalDir, 'metadata.json'));
+        if (previous.contentHash === contentHash && previous.independentReview === 'approved' && previous.artifactHashes &&
+            (await Promise.all(previous.artifacts.map(async f => previous.artifactHashes[f] === digest(await readFile(path.join(finalDir, f)))))).every(Boolean)) {
+          report.guides.push({ issueId: t.issue.id, articleId: article.id, state: 'already-published' });
+          continue;
+        }
       }
       const notePath = path.join(jobDir, 'note.json');
       console.log(`Generating/reusing public guide ${report.guides.length + 1}/${maxGuides}: ${article.title}…`);
