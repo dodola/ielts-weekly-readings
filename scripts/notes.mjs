@@ -6,6 +6,11 @@ export const domains = {
   atlantic: 'theatlantic.com', wired: 'wired.com',
 };
 export function digest(value) { return createHash('sha256').update(value).digest('hex'); }
+export function assertPrivateSnapshot(repository, snapshot) {
+  if (snapshot.private !== true || snapshot.full_name !== repository) {
+    throw new Error('Original article archiving requires a verified PRIVATE destination; public/unknown repositories are refused.');
+  }
+}
 export function windowFor(date = new Date()) {
   const end = new Intl.DateTimeFormat('sv-SE', { timeZone: 'Asia/Shanghai',
     year: 'numeric', month: '2-digit', day: '2-digit' }).format(date);

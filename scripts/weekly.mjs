@@ -7,10 +7,10 @@ import path from 'node:path';
 import os from 'node:os';
 import { readFile, writeFile, mkdir, rename, stat, open, unlink, copyFile, readdir } from 'node:fs/promises';
 import { windowFor, issuesInWindow, sourceURL, digest, POLICY, noteSchema, auditSchema,
-  validateNote, renderNote, publicMetadata } from './notes.mjs';
+  validateNote, renderNote, publicMetadata, assertPrivateSnapshot } from './notes.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
-const HELP = `Usage: node scripts/weekly.mjs --project PATH --source PATH [--execute --publish]
+const HELP = `Usage: node scripts/weekly.mjs --project PATH --source PATH --output-repo PATH [--execute --publish]
 
 Every online run safely fast-forward updates the exact --source checkout first.
 Default: refresh + private dry-run; no AI calls, no commit, no push.
@@ -25,7 +25,8 @@ Default: refresh + private dry-run; no AI calls, no commit, no push.
 --skill-root PATH     Installed intensive-reading skill.
 --source-links PATH   Private JSON mapping issueId/articleId -> verified publisher URL.
 --no-documents        Generate Markdown only; still run semantic review.
---repository OWNER/NAME  Expected remote (default dodola/ielts-weekly-readings).
+--output-repo PATH     Separate PRIVATE Git checkout for original texts + guides.
+--repository OWNER/NAME  Expected PRIVATE remote (default dodola/ielts-reading-library).
 
 Codex reservations persist per date range, including failed attempts. TypeSafe
 has no monetary or logical-request cap, per user instruction. SDK may retry each
@@ -33,7 +34,8 @@ logical request twice (up to 3 transport attempts). No auto-recharge or scheduli
 `;
 const privateRoot = path.join(root, '.private');
 const cache = path.join(privateRoot, 'cache');
-const publicRoot = path.join(root, 'readings');
+let outputRoot = path.join(privateRoot, 'library');
+let publicRoot = path.join(outputRoot, 'readings');
 let active = null;
 const stop = () => {
   if (active) { try { process.kill(-active.pid, 'SIGTERM'); } catch {} }
@@ -112,17 +114,21 @@ async function main() {
     date: { type: 'string' }, from: { type: 'string' }, to: { type: 'string' }, 'max-articles': { type: 'string' }, 'max-guides': { type: 'string' },
     'max-codex-calls': { type: 'string' },
     'skill-root': { type: 'string' }, 'source-links': { type: 'string' },
-    'no-documents': { type: 'boolean' }, repository: { type: 'string' },
+    'no-documents': { type: 'boolean' }, repository: { type: 'string' }, 'output-repo': { type: 'string' },
   } });
   if (v.help) { console.log(HELP); return; }
   if (!v.project || !v.source) throw new Error('--project and --source are required.');
   if (v.publish && !v.execute) throw new Error('--publish requires --execute.');
   if (v.offline && (v.execute || v.publish)) throw new Error('--offline is restricted to dry-runs.');
+  if (v.execute && !v['output-repo']) throw new Error('--execute requires an explicit --output-repo private checkout.');
   const project = path.resolve(v.project), source = path.resolve(v.source);
   const skill = path.resolve(v['skill-root'] ?? path.join(os.homedir(), '.codex/skills/intensive-reading'));
   const maxArticles = int(v['max-articles'], Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER), maxGuides = int(v['max-guides'], 10, 10);
   const maxCodex = int(v['max-codex-calls'], 40, 40);
-  const repository = v.repository ?? 'dodola/ielts-weekly-readings';
+  const repository = v.repository ?? 'dodola/ielts-reading-library';
+  outputRoot = path.resolve(v['output-repo'] ?? outputRoot);
+  if (outputRoot === root) throw new Error('Artifact checkout must be separate from the public workflow code.');
+  publicRoot = path.join(outputRoot, 'readings');
   if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository)) throw new Error('Invalid repository name.');
   if (v.date && (!/^20\d\d-\d\d-\d\d$/.test(v.date) || new Date(`${v.date}T00:00:00Z`).toISOString().slice(0, 10) !== v.date)) {
     throw new Error('--date must be a valid YYYY-MM-DD.');
@@ -199,14 +205,15 @@ async function main() {
     if (!v['no-documents']) for (const dep of ['pandoc', 'soffice', 'python3', 'pdftotext', 'pdfinfo', 'pdftoppm']) {
       await command('which', [dep]);
     }
-    if (v.publish) {
-      const actual = await command('git', ['remote', 'get-url', 'origin']);
+    if (v.execute) {
+      await assertPrivateRepository(repository);
+      const actual = await command('git', ['remote', 'get-url', 'origin'], { cwd: outputRoot });
       if (![ `https://github.com/${repository}.git`, `git@github.com:${repository}.git` ].includes(actual)) throw new Error('Output repository remote mismatch.');
-      const dirty = (await command('git', ['status', '--porcelain', '--untracked-files=all'])).split('\n').filter(Boolean);
+      const dirty = (await command('git', ['status', '--porcelain', '--untracked-files=all'], { cwd: outputRoot })).split('\n').filter(Boolean);
       if (dirty.some(line => !/^readings\//.test(line.slice(3)) && line.slice(3) !== 'INDEX.md')) throw new Error('Output checkout has unrelated local changes; commit preparation first.');
       await command('gh', ['api', 'user', '--jq', '.login']);
       await command('git', ['pull', '--ff-only', '--no-rebase', 'origin', 'main'],
-        { log: path.join(runDir, 'output-refresh.log') });
+        { cwd: outputRoot, log: path.join(runDir, 'output-refresh.log') });
     }
     const ledgerPath = path.join(runDir, 'budget.json');
     let ledger = await exists(ledgerPath) ? await json(ledgerPath) : { typeSafeReserved: 0, codexReserved: 0 };
@@ -280,7 +287,7 @@ async function main() {
       const finalDir = path.join(publicRoot, t.issue.id, article.id);
       if (await exists(path.join(finalDir, 'metadata.json'))) {
         const previous = await json(path.join(finalDir, 'metadata.json'));
-        if (previous.contentHash === contentHash && previous.independentReview === 'approved' && previous.artifactHashes &&
+        if (previous.contentHash === contentHash && previous.independentReview === 'approved' && previous.artifactHashes && previous.artifacts.includes('original.txt') &&
             (await Promise.all(previous.artifacts.map(async f => previous.artifactHashes[f] === digest(await readFile(path.join(finalDir, f)))))).every(Boolean)) {
           report.guides.push({ issueId: t.issue.id, articleId: article.id, state: 'already-published' });
           if (v.publish) await publish(repository, runDir, window.end);
@@ -306,11 +313,12 @@ async function main() {
         quoteBudget = validateNote(note, article);
       }
       const markdown = renderNote(note, metadata);
+      const existingMarkdown = await exists(path.join(jobDir, 'guide.md')) ? await readFile(path.join(jobDir, 'guide.md'), 'utf8') : null;
       await save(path.join(jobDir, 'guide.md'), markdown);
       const images = [];
       let artifactFiles = ['guide.md'];
       if (!v['no-documents']) {
-        await command('bash', [path.join(skill, 'scripts/build.sh'), path.join(jobDir, 'guide.md')],
+        if (existingMarkdown !== markdown || !await exists(path.join(jobDir, 'guide.pdf')) || !await exists(path.join(jobDir, 'guide.docx'))) await command('bash', [path.join(skill, 'scripts/build.sh'), path.join(jobDir, 'guide.md')],
           { cwd: jobDir, env: safeEnv, timeout: 10 * 60000, log: path.join(jobDir, 'build.log') });
         const info = await command('pdfinfo', [path.join(jobDir, 'guide.pdf')]);
         const pages = Number(info.match(/^Pages:\s+(\d+)/m)?.[1]);
@@ -341,6 +349,9 @@ async function main() {
       }
       await mkdir(finalDir, { recursive: true });
       for (const f of artifactFiles) await copyFile(path.join(jobDir, f), path.join(finalDir, f));
+      await assertPrivateRepository(repository);
+      await save(path.join(finalDir, 'original.txt'), `${article.title}\n${article.publication} | ${article.author || 'Author not listed'} | Issue ${t.issue.issueDate}\nPublisher source: ${metadata.sourceUrl}\n\nLocal user-provided input; private study archive.\n\n${article.paragraphs.join('\n\n')}\n`);
+      artifactFiles.push('original.txt');
       const provenance = async file => {
         const log = await readFile(path.join(jobDir, file), 'utf8');
         return { model: log.match(/^model:\s+(.+)$/m)?.[1] ?? 'unavailable',
@@ -362,9 +373,12 @@ async function main() {
   } finally { clearTimeout(globalTimer); await unlink(lockPath).catch(() => {}); }
 }
 async function publish(repository, runDir, runDate) {
+  await assertPrivateRepository(repository);
   // Publish only trusted allowlisted artifacts; never git add . or cache/logs.
   const paths = [];
-  const index = ['# IELTS Weekly Readings', '', '公开节选精读：原创教学讲解、少量引文及出版方文章链接。', ''];
+  const index = ['# IELTS Reading Library', '', '用户指定本地外刊输入的个人私有阅读库。原文单独保存，精读为原创教学讲解及有限引文版；不代表出版方转载授权。', '',
+    '| 文章与期号 | 出版方原文 | 筛选理由 | 本地原文 | 精读 | Word | PDF |',
+    '| --- | --- | --- | --- | --- | --- | --- |'];
   for (const issue of (await readdir(publicRoot)).sort()) {
     safeId(issue);
     for (const article of (await readdir(path.join(publicRoot, issue))).sort()) {
@@ -378,29 +392,35 @@ async function publish(repository, runDir, runDate) {
         if (/\/home\/|\/Users\/|TYPESAFE_API_KEY|github_pat_|gh[pousr]_[A-Za-z0-9]{20}|sk-[A-Za-z0-9]{20}|PRIVATE KEY/.test(text)) throw new Error('Public secret/path scan failed.');
       };
       noSecrets(markdown); noSecrets(JSON.stringify(meta));
-      const rel = path.relative(root, dir);
-      if (meta.artifacts.some(f => !['guide.md', 'guide.docx', 'guide.pdf'].includes(f))) throw new Error('Unknown public artifact.');
+      const rel = path.relative(outputRoot, dir);
+      if (meta.artifacts.some(f => !['guide.md', 'guide.docx', 'guide.pdf', 'original.txt'].includes(f))) throw new Error('Unknown archive artifact.');
       for (const f of [...meta.artifacts, 'metadata.json']) {
         const p = path.join(dir, f);
         if ((await stat(p)).size > 20 * 1024 * 1024) throw new Error('Public artifact size limit exceeded.');
         if (f !== 'metadata.json' && (!meta.artifactHashes?.[f] || digest(await readFile(p)) !== meta.artifactHashes[f])) throw new Error('Public artifact changed after approval; stopped.');
         paths.push(path.join(rel, f));
       }
-      index.push(`- ${meta.issueDate} · ${meta.publication} · [${meta.title.replace(/[\[\]\n]/g, '')}](${rel}/guide.md) · [文章来源](${meta.sourceUrl})`);
+      index.push(`| ${meta.issueDate} · ${meta.publication} · ${meta.title.replace(/[\[\]\n|]/g, '')} | [原文链接](${meta.sourceUrl}) | 推荐；综合分 ${meta.compositeScore}；置信度 ${(meta.confidence * 100).toFixed(0)}%；${meta.topic} / ${meta.difficulty} | [原文](${rel}/original.txt) | [MD](${rel}/guide.md) | ${meta.artifacts.includes('guide.docx') ? `[DOCX](${rel}/guide.docx)` : '—'} | ${meta.artifacts.includes('guide.pdf') ? `[PDF](${rel}/guide.pdf)` : '—'} |`);
     }
   }
-  await save(path.join(root, 'INDEX.md'), `${index.join('\n')}\n`);
-  paths.push('INDEX.md');
+  await save(path.join(outputRoot, 'INDEX.md'), `${index.join('\n')}\n`);
+  await save(path.join(outputRoot, 'README.md'), `${index.join('\n')}\n\n流程代码及运行说明：[ielts-weekly-readings](https://github.com/dodola/ielts-weekly-readings)。本库不新增协作者。\n`);
+  paths.push('INDEX.md', 'README.md');
   // Refuse existing staged files or unrelated changes; only this run's outputs
   // may be committed. Files that are unchanged are harmless in the allowlist.
-  if (await command('git', ['diff', '--cached', '--name-only'])) throw new Error('Pre-existing staged files; stopped before publication.');
-  await command('git', ['add', '--', ...paths]);
-  const staged = (await command('git', ['diff', '--cached', '--name-only'])).split('\n').filter(Boolean);
+  if (await command('git', ['diff', '--cached', '--name-only'], { cwd: outputRoot })) throw new Error('Pre-existing staged files; stopped before publication.');
+  await command('git', ['add', '--', ...paths], { cwd: outputRoot });
+  const staged = (await command('git', ['diff', '--cached', '--name-only'], { cwd: outputRoot })).split('\n').filter(Boolean);
   if (staged.some(f => !paths.includes(f))) throw new Error('Unexpected staged file; stopped.');
   if (staged.length) await command('git', ['commit', '-m', `Publish IELTS reading notes ${runDate}`],
-    { log: path.join(runDir, 'commit.log') });
+    { cwd: outputRoot, log: path.join(runDir, 'commit.log') });
+  await assertPrivateRepository(repository);
   await command('git', ['-c', 'credential.helper=', '-c', 'credential.helper=!gh auth git-credential',
-    'push', 'origin', 'HEAD:main'], { log: path.join(runDir, 'push.log') });
+    'push', 'origin', 'HEAD:main'], { cwd: outputRoot, log: path.join(runDir, 'push.log') });
   console.log(`Published to https://github.com/${repository}`);
+}
+async function assertPrivateRepository(repository) {
+  const repo = JSON.parse(await command('gh', ['api', `repos/${repository}`, '--jq', '{full_name: .full_name, private: .private}']));
+  assertPrivateSnapshot(repository, repo);
 }
 main().catch(error => { console.error(error.message); process.exitCode = 1; });

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { windowFor, issuesInWindow, sourceURL, validateNote, renderNote, assertPrivateSafe } from '../scripts/notes.mjs';
+import { windowFor, issuesInWindow, sourceURL, validateNote, renderNote, assertPrivateSafe, assertPrivateSnapshot } from '../scripts/notes.mjs';
 
 export const article = { paragraphs: [
   'Public libraries provide access to information. They help residents examine evidence before reaching conclusions. A successful programme may require sustained investment from local government.'
@@ -53,4 +53,11 @@ test('public renderer uses skill roles and labels examples as original', () => {
   const md = renderNote(note, metadata);
   for (const role of ['# ★', '【 导读 · Lead-in 】', '**En:**', '**译:**', '**▶ 1.', '### 📖 精读', '原创例句', '公开节选版本']) assert.ok(md.includes(role));
   assert.equal((md.match(/provide access to information/g) ?? []).length, 1);
+});
+test('original article publication refuses public, unknown or mismatched destinations', () => {
+  const name = 'dodola/ielts-reading-library';
+  assert.doesNotThrow(() => assertPrivateSnapshot(name, { full_name: name, private: true }));
+  for (const snapshot of [{ full_name: name, private: false }, { full_name: name }, { full_name: 'other/repository', private: true }]) {
+    assert.throws(() => assertPrivateSnapshot(name, snapshot), /PRIVATE destination/);
+  }
 });
