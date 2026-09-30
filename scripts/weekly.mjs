@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import os from 'node:os';
 import { readFile, writeFile, mkdir, rename, stat, open, unlink, copyFile, readdir } from 'node:fs/promises';
-import { windowFor, issuesInWindow, sourceURL, digest, auditSchema, publicMetadata, assertPrivateSnapshot } from './notes.mjs';
+import { windowFor, issuesInWindow, sourceURL, digest, publicMetadata, assertPrivateSnapshot } from './notes.mjs';
 import { FULL_POLICY, createFullGuide } from './full-reading.mjs';
 import { serialQueue, runBounded } from './concurrency.mjs';
 import { randomUUID } from 'node:crypto';
@@ -24,10 +24,10 @@ Default: refresh + private dry-run; no AI calls, no commit, no push.
 --max-articles N       Optional candidate cap; default covers all candidates.
 --max-guides N         Selected guide cap (default 10, maximum 10).
 --generation-concurrency N  Independent guide workers (default 2, maximum 2); Git is serial.
---max-codex-calls N    Generation + review reservations per date range (default 40).
+--max-codex-calls N    Generation/repair reservations per date range (default 40).
 --skill-root PATH     Installed intensive-reading skill.
 --source-links PATH   Private JSON mapping issueId/articleId -> verified publisher URL.
---no-documents        Generate Markdown only; still run semantic review.
+--no-documents        Generate Markdown only; still check full source coverage.
 --output-repo PATH     Separate PRIVATE Git checkout for original texts + guides.
 --mode full-ielts      Complete original + translation + IELTS skill template (default).
 --repository OWNER/NAME  Expected PRIVATE remote (default dodola/ielts-reading-library).
@@ -242,16 +242,6 @@ async function main() {
     const skillHash = digest((await Promise.all(['SKILL.md', 'references/method.md', 'references/template-ielts.md',
       'references/ielts-targets.md', 'references/template.md', 'references/style-spec.md', 'scripts/build.sh', 'scripts/postprocess.py', 'scripts/print_variant.py',
       'scripts/make_ref.py', 'scripts/tokens.py'].map(f => readFile(path.join(skill, f))))).map(b => b.toString()).join('\n'));
-    async function generate(jobDir, schema, output, prompt, images = []) {
-      await reserve('codexReserved', 1, maxCodex);
-      const schemaPath = path.join(jobDir, `${output}.schema.json`);
-      await save(schemaPath, schema);
-      await command(codex, ['exec', '--model', 'gpt-6.1-sol', '--config', 'model_reasoning_effort="high"', '--ephemeral', '--sandbox', 'workspace-write', '--skip-git-repo-check',
-        '-C', jobDir, '--output-schema', schemaPath, '--output-last-message', path.join(jobDir, output),
-        ...images.flatMap(p => ['-i', p]), '-'],
-        { cwd: jobDir, env: safeEnv, input: prompt, timeout: 25 * 60000, log: path.join(jobDir, `${output}.codex.log`) });
-      return json(path.join(jobDir, output));
-    }
     const selected = [];
     report.inputTokens = 0;
     report.analyzed = 0;
@@ -301,23 +291,23 @@ async function main() {
       const finalDir = path.join(publicRoot, t.issue.id, article.id);
       if (await exists(path.join(finalDir, 'metadata.json'))) {
         const previous = await json(path.join(finalDir, 'metadata.json'));
-        if (previous.contentHash === contentHash && previous.mode === 'full-ielts' && previous.coverage?.fullEnglishSequenceMatched === true && previous.independentReview === 'approved' && previous.artifactHashes && previous.artifacts.includes('original.txt') &&
+        if (previous.contentHash === contentHash && previous.mode === 'full-ielts' && previous.coverage?.fullEnglishSequenceMatched === true && ['approved', 'disabled-by-user'].includes(previous.independentReview) && previous.artifactHashes && previous.artifacts.includes('original.txt') &&
             (await Promise.all(previous.artifacts.map(async f => previous.artifactHashes[f] === digest(await readFile(path.join(finalDir, f)))))).every(Boolean)) {
           report.guides.push({ issueId: t.issue.id, articleId: article.id, state: 'already-published' });
-          if (v.publish) await publish(repository, runDir, window.end);
           continue;
         }
       }
       pending.push({ t, article, metadata, contentHash, jobDir, finalDir });
     }
     const completeSerial = serialQueue();
+    let publicationDone = false;
     const buildSerial = serialQueue();
     const guideCommand = (binary, args, options) => binary === 'bash' && args[0] === path.join(skill, 'scripts/build.sh')
       ? buildSerial(() => command(binary, args, options)) : command(binary, args, options);
     const alreadyCompleted = report.guides.length;
     await runBounded(pending, generationConcurrency, async ({ t, article, metadata, contentHash, jobDir, finalDir }, index) => {
       console.log(`Generating/reusing COMPLETE IELTS guide ${alreadyCompleted + index + 1}/${maxGuides}: ${article.title}…`);
-      const full = await createFullGuide({ jobDir, article, skill, codex, safeEnv, command: guideCommand, generate,
+      const full = await createFullGuide({ jobDir, article, skill, codex, safeEnv, command: guideCommand,
         reserve, maxCodex, noDocuments: v['no-documents'] });
       await completeSerial(async () => {
       const artifactFiles = [...full.artifactFiles];
@@ -328,18 +318,18 @@ async function main() {
       artifactFiles.push('original.txt');
       await save(path.join(finalDir, 'metadata.json'), { ...metadata, contentHash, coverage: full.coverage,
         artifacts: artifactFiles, artifactHashes: Object.fromEntries(await Promise.all(artifactFiles.map(async f =>
-          [f, digest(await readFile(path.join(finalDir, f)))]))), independentReview: 'approved',
+          [f, digest(await readFile(path.join(finalDir, f)))]))), independentReview: full.independentReview,
         generation: full.generation, review: full.review, repair: full.repair });
       report.guides.push({ issueId: t.issue.id, articleId: article.id, state: 'generated', sourceUrl: metadata.sourceUrl });
       await save(path.join(runDir, 'report.json'), report);
-      if (v.publish) await publish(repository, runDir, window.end);
+      if (v.publish) { await publish(repository, runDir, window.end); publicationDone = true; }
       });
     });
     report.status = report.guides.length ? 'completed' : 'no-selected-articles';
     report.budget = ledger;
     await save(path.join(runDir, 'report.json'), report);
     console.log(`Completed: ${report.guides.length} guides (caps are processing ceilings, not guaranteed output).`);
-    if (v.publish && report.guides.length) await publish(repository, runDir, window.end);
+    if (v.publish && report.guides.length && !publicationDone) await publish(repository, runDir, window.end);
   } finally { clearTimeout(globalTimer); await unlink(lockPath).catch(() => {}); }
 }
 async function publish(repository, runDir, runDate) {
@@ -355,8 +345,8 @@ async function publish(repository, runDir, runDate) {
       safeId(article);
       const dir = path.join(publicRoot, issue, article), meta = await json(path.join(dir, 'metadata.json'));
       if (meta.mode !== 'full-ielts') continue; // Legacy excerpts are never indexed as full guides.
-      if (meta.independentReview !== 'approved' || meta.coverage?.fullEnglishSequenceMatched !== true) {
-        throw new Error('Full IELTS metadata lacks independent review or complete English coverage.');
+      if (!['approved', 'disabled-by-user'].includes(meta.independentReview) || meta.coverage?.fullEnglishSequenceMatched !== true) {
+        throw new Error('Full IELTS metadata lacks an explicit review policy or complete English coverage.');
       }
       const markdown = await readFile(path.join(dir, 'guide.md'), 'utf8');
       const noSecrets = text => {

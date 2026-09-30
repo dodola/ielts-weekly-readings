@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { validateFullGuide, createFullGuide, FULL_POLICY } from '../scripts/full-reading.mjs';
-import { mkdtemp, writeFile, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -48,18 +48,31 @@ test('rejected teaching content is repaired once and needs a fresh successful re
   for (const approvedSecondTime of [true, false]) {
     const jobDir = await mkdtemp(path.join(os.tmpdir(), 'full-review-repair-'));
     try {
+      const skill = path.join(jobDir, 'skill');
+      await mkdir(path.join(skill, 'references'), { recursive: true });
+      await mkdir(path.join(skill, 'scripts'));
+      for (const file of ['SKILL.md', 'references/method.md', 'references/template-ielts.md', 'references/ielts-targets.md', 'scripts/print_variant.py']) await writeFile(path.join(skill, file), 'complete reference fixture');
+      await writeFile(path.join(skill, 'references/template.md'), '六条硬性约束\n6. final constraint\n````markdown\ntextbook-only');
+      await writeFile(path.join(jobDir, 'source.json'), JSON.stringify({ article }));
       await writeFile(path.join(jobDir, 'guide.md'), `${markdown}\n语法：错误标签。\n`);
       await writeFile(path.join(jobDir, 'full-generation.codex.log'), 'model: original-worker\nreasoning effort: high\n');
       let repairs = 0, audits = 0;
-      const options = { jobDir, article, skill: '/installed-skill', codex: 'codex', safeEnv: {}, maxCodex: 40, noDocuments: true,
+      const options = { jobDir, article, skill, codex: 'codex', safeEnv: {}, maxCodex: 40, noDocuments: true, independentReview: true,
         reserve: async () => {},
-        command: async (_binary, _args, { log }) => {
+        command: async (_binary, args, { log, input }) => {
+          assert.deepEqual(args.slice(0, 5), ['exec', '--model', 'gpt-6.1-sol', '--config', 'model_reasoning_effort="high"']);
+          assert.ok(input.includes('complete reference fixture'));
+          assert.ok(input.includes(article.paragraphs[1]));
+          assert.ok(input.includes('validate-guide.mjs'));
           repairs++;
           const file = path.join(jobDir, 'guide.md');
           await writeFile(file, (await readFile(file, 'utf8')).replace('错误标签', '正确标签'));
           await writeFile(log, 'model: repair-worker\nreasoning effort: high\n');
         },
-        generate: async () => {
+        generate: async (_dir, _schema, _output, prompt) => {
+          assert.ok(prompt.includes('=== ENTIRE GUIDE DATA'));
+          assert.ok(prompt.includes('### 写在最后'));
+          assert.ok(prompt.includes(article.paragraphs[1]));
           audits++;
           await writeFile(path.join(jobDir, 'full-audit.json.codex.log'), 'model: independent-reviewer\nreasoning effort: high\n');
           return { approved: audits === 2 && approvedSecondTime, reasons: ['A teaching term needs correction.'] };
@@ -74,4 +87,18 @@ test('rejected teaching content is repaired once and needs a fresh successful re
       assert.equal(JSON.parse(await readFile(path.join(jobDir, 'full-review.rejected.json'))).approved, false);
     } finally { await rm(jobDir, { recursive: true, force: true }); }
   }
+});
+
+test('default user policy skips independent review and PDF sampling but preserves full coverage', async () => {
+  const jobDir = await mkdtemp(path.join(os.tmpdir(), 'no-independent-review-'));
+  try {
+    await writeFile(path.join(jobDir, 'guide.md'), markdown);
+    await writeFile(path.join(jobDir, 'full-generation.codex.log'), 'model: gpt-6.1-sol\nreasoning effort: high\n');
+    const result = await createFullGuide({ jobDir, article, skill: '/not-needed-for-cache', noDocuments: true,
+      reserve: async () => assert.fail('unexpected model reservation'), command: async () => assert.fail('unexpected command'),
+      generate: async () => assert.fail('independent review must not run') });
+    assert.equal(result.independentReview, 'disabled-by-user');
+    assert.equal(result.coverage.fullEnglishSequenceMatched, true);
+    assert.equal(result.review, undefined);
+  } finally { await rm(jobDir, { recursive: true, force: true }); }
 });
