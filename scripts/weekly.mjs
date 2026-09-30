@@ -329,7 +329,7 @@ async function main() {
       await save(path.join(finalDir, 'metadata.json'), { ...metadata, contentHash, coverage: full.coverage,
         artifacts: artifactFiles, artifactHashes: Object.fromEntries(await Promise.all(artifactFiles.map(async f =>
           [f, digest(await readFile(path.join(finalDir, f)))]))), independentReview: 'approved',
-        generation: full.generation, review: full.review });
+        generation: full.generation, review: full.review, repair: full.repair });
       report.guides.push({ issueId: t.issue.id, articleId: article.id, state: 'generated', sourceUrl: metadata.sourceUrl });
       await save(path.join(runDir, 'report.json'), report);
       if (v.publish) await publish(repository, runDir, window.end);

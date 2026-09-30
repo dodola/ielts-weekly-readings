@@ -1,6 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { validateFullGuide, FULL_POLICY } from '../scripts/full-reading.mjs';
+import { validateFullGuide, createFullGuide, FULL_POLICY } from '../scripts/full-reading.mjs';
+import { mkdtemp, writeFile, readFile, rm } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 
 const article = { paragraphs: ['The sample contains 10 items. Each item matters.', 'Its final paragraph must also appear.'] };
 const markdown = `---
@@ -40,4 +43,35 @@ test('full-mode rejects omitted/reordered paragraphs, modified numbers and spars
     markdown.replace('> **译:** 每项都重要。', ''),
     markdown.replace('<!-- source:P001 -->', '<!-- source:P003 -->'),
     `${markdown}\n公开节选版本`]) assert.throws(() => validateFullGuide(invalid, article));
+});
+test('rejected teaching content is repaired once and needs a fresh successful review', async () => {
+  for (const approvedSecondTime of [true, false]) {
+    const jobDir = await mkdtemp(path.join(os.tmpdir(), 'full-review-repair-'));
+    try {
+      await writeFile(path.join(jobDir, 'guide.md'), `${markdown}\n语法：错误标签。\n`);
+      await writeFile(path.join(jobDir, 'full-generation.codex.log'), 'model: original-worker\nreasoning effort: high\n');
+      let repairs = 0, audits = 0;
+      const options = { jobDir, article, skill: '/installed-skill', codex: 'codex', safeEnv: {}, maxCodex: 40, noDocuments: true,
+        reserve: async () => {},
+        command: async (_binary, _args, { log }) => {
+          repairs++;
+          const file = path.join(jobDir, 'guide.md');
+          await writeFile(file, (await readFile(file, 'utf8')).replace('错误标签', '正确标签'));
+          await writeFile(log, 'model: repair-worker\nreasoning effort: high\n');
+        },
+        generate: async () => {
+          audits++;
+          await writeFile(path.join(jobDir, 'full-audit.json.codex.log'), 'model: independent-reviewer\nreasoning effort: high\n');
+          return { approved: audits === 2 && approvedSecondTime, reasons: ['A teaching term needs correction.'] };
+        } };
+      if (approvedSecondTime) {
+        const result = await createFullGuide(options);
+        assert.equal(result.coverage.fullEnglishSequenceMatched, true);
+        assert.equal(result.repair.model, 'repair-worker');
+        assert.equal(result.review.model, 'independent-reviewer');
+      } else await assert.rejects(createFullGuide(options), /rejected.*after one repair/);
+      assert.equal(repairs, 1); assert.equal(audits, 2);
+      assert.equal(JSON.parse(await readFile(path.join(jobDir, 'full-review.rejected.json'))).approved, false);
+    } finally { await rm(jobDir, { recursive: true, force: true }); }
+  }
 });

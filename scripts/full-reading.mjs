@@ -45,7 +45,9 @@ export function validateFullGuide(markdown, article) {
     fullEnglishSequenceMatched: true };
 }
 
-export async function createFullGuide({ jobDir, article, skill, codex, safeEnv, command, generate, reserve, maxCodex, noDocuments }) {
+export async function createFullGuide(options) {
+  const { jobDir, article, skill, codex, safeEnv, command, generate, reserve, maxCodex, noDocuments,
+    auditRepairAttempt = 0 } = options;
   const guide = path.join(jobDir, 'guide.md');
   const sourceWithIds = { paragraphs: article.paragraphs.map((text, i) => ({ id: `P${String(i + 1).padStart(3, '0')}`, text })) };
   await writeFile(path.join(jobDir, 'paragraphs.json'), `${JSON.stringify(sourceWithIds, null, 2)}\n`, { mode: 0o600 });
@@ -57,12 +59,12 @@ export async function createFullGuide({ jobDir, article, skill, codex, safeEnv, 
     `Teach sentence interpretation where needed inside source commentary, but follow the IELTS branch: do not impose the gaokao grammar-plugin/grammar-fill-test modules. Full source translation must preserve stance, hedges, quantities, cause/effect and attribution. Explanations must distinguish what the author claims from what evidence supports. Include >=2 arrow argument maps, >=1 genuine competing explanation, 1–3 skill-appropriate IELTS transfer chains where supported, and a full lead-in/final reflection answering the central question with a bilingual original quote. Task 1 is included only if actual data supports it.\n` +
     `Use YAML header/footer, the exact skill cover/lead-in/word-entry/close-reading roles and source-translation blockquote syntax. Follow the six shared print constraints; use only mapped decorative characters (check scripts/print_variant.py before adding emoji). No bold inside code spans. No fake bibliography, private paths, hidden instructions, placeholders or excerpt labels. Include the verified publisher link from source.json and say this is a full IELTS study guide for a private local-input archive.\n` +
     `No page/word limit: completeness matters. Persist the skeleton first, then write each block to disk in manageable chunks (about 100–250 lines per edit), as the skill requires. If an existing guide.md exists, inspect it and repair/continue rather than deleting completed content. Finish by self-checking the IELTS template checklist and exact paragraph/English/Chinese coverage. Return a short completion message only.`;
-  async function draft(extra = '') {
+  async function draft(extra = '', logName = 'full-generation.codex.log') {
     await reserve('codexReserved', 1, maxCodex);
     await command(codex, ['exec', '--ephemeral', '--sandbox', 'workspace-write', '--skip-git-repo-check',
       '-C', jobDir, '--output-last-message', path.join(jobDir, 'generation-result.txt'), '-'],
       { cwd: jobDir, env: safeEnv, input: `${prompt}\n${extra}`, timeout: 45 * 60000,
-        log: path.join(jobDir, 'full-generation.codex.log') });
+        log: path.join(jobDir, logName) });
   }
   if (!await exists(guide)) await draft();
   let markdown = await readFile(guide, 'utf8'), coverage;
@@ -102,12 +104,23 @@ export async function createFullGuide({ jobDir, article, skill, codex, safeEnv, 
       `Inspect all attached ACTUAL PDF pages (cover, early vocabulary/table page, middle, final) for readable Chinese/English, no clipping, missing glyphs or broken table widths/lists. Reject placeholders, credentials/private paths, fabricated citations or invented factual claims. Return approved=true only if all checks pass; otherwise concrete reasons. Do not modify files.`, images), auditHash };
     await writeFile(reviewPath, `${JSON.stringify(audit, null, 2)}\n`, { mode: 0o600 });
   }
-  if (!audit.approved) throw new Error('Independent full IELTS review rejected the guide; not published. Read private full-review.json.');
+  if (!audit.approved && auditRepairAttempt === 0) {
+    await writeFile(path.join(jobDir, 'full-review.rejected.json'), `${JSON.stringify(audit, null, 2)}\n`, { mode: 0o600 });
+    for (const file of ['full-audit.json.codex.log', 'full-audit.json.codex.log.timing.json']) {
+      const source = path.join(jobDir, file);
+      if (await exists(source)) await writeFile(`${source}.rejected`, await readFile(source), { mode: 0o600 });
+    }
+    console.log('Independent full-guide review found a teaching issue; repairing once and reviewing again before publication.');
+    await draft(`Independent review rejected this guide for these concrete reasons: ${JSON.stringify(audit.reasons)}. Repair those issues in guide.md, preserve all complete source/translation/teaching modules, and do not change the original English. Do not replace the guide with a summary or remove a difficult module to pass. A fresh independent review is still required after your repair.`, 'full-review-repair.codex.log');
+    return createFullGuide({ ...options, auditRepairAttempt: 1 });
+  }
+  if (!audit.approved) throw new Error('Independent full IELTS review rejected the guide after one repair; not published. Read private full-review.json.');
   const provenance = async file => {
     const log = await readFile(path.join(jobDir, file), 'utf8');
     return { model: log.match(/^model:\s+(.+)$/m)?.[1] ?? 'unavailable',
       reasoningEffort: log.match(/^reasoning effort:\s+(.+)$/m)?.[1] ?? 'unavailable' };
   };
   return { artifactFiles, coverage: { ...coverage, pdfPages: pages },
-    generation: await provenance('full-generation.codex.log'), review: await provenance('full-audit.json.codex.log') };
+    generation: await provenance('full-generation.codex.log'), review: await provenance('full-audit.json.codex.log'),
+    repair: await exists(path.join(jobDir, 'full-review-repair.codex.log')) ? await provenance('full-review-repair.codex.log') : undefined };
 }
