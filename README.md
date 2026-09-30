@@ -17,14 +17,14 @@ node scripts/weekly.mjs --project /path/to/ielts-reading-curator \
 node scripts/weekly.mjs --project /path/to/ielts-reading-curator \
   --source /path/to/awesome-english-ebooks \
   --output-repo /path/to/private-reading-library \
-  --repository dodola/ielts-reading-library --execute --publish --max-guides 10
+  --repository dodola/ielts-reading-library --execute --publish --max-guides 10 --mode full-ielts
 
 # 月度试跑/补录：明确日期范围（最多31天）
 node scripts/weekly.mjs --project /path/to/ielts-reading-curator \
   --source /path/to/awesome-english-ebooks \
   --output-repo /path/to/private-reading-library \
   --repository dodola/ielts-reading-library \
-  --from 2026-09-01 --to 2026-09-30 --execute --publish --max-guides 10
+  --from 2026-09-01 --to 2026-09-30 --execute --publish --max-guides 10 --mode full-ielts
 
 npm test
 node scripts/weekly.mjs --help
@@ -40,15 +40,19 @@ node scripts/weekly.mjs --help
 
 用户明确要求不限制 TypeSafe 额度：不设货币或总逻辑请求上限；保留既有 SDK 每请求最多2次重试、请求超时、有效缓存去重。长文按完整分段分析，预览报告的逻辑请求数不含传输重试。不会充值、新增订阅或更改计费设置。截止2026-09-30，官方公布 Jev 输入价为 $0.042/百万token、输出免费（[官方说明](https://typesafe.ai/blog/introducing-system-one-models-and-jev)）；公开价不能确认用户余额、预付积分或自动扣费状态。
 
-## 自动生成与私有归档
+## 完整 IELTS 精读与私有归档
 
-Codex 在隔离工作目录读取用户给定本地文章及 skill 的 IELTS 方法、模板和语域判据，自动输出 JSON schema 约束的教学内容；受信任代码渲染 Markdown，再执行安装 skill 的固定 `scripts/build.sh` 导出 DOCX/PDF。无需手工填写模板。保留字形、六角色和字面星号构建门禁，实际渲染封面、内页及末页供独立审核；审核教学准确性、引文、隐私及页面可读性。记录生成和审核日志回执中的实际 model/effort，不公开 session ID、提示词或日志。
+默认且唯一生成模式是 `full-ielts`，版本 `private-full-ielts-v1`。Codex 直接按本机 `intensive-reading` 的完整 IELTS 模板分块写 `guide.md`，不使用稀疏 JSON 节选模板。原文全部保留，按句给出完整中文翻译；每个功能块含双语对照、表达清单、详尽词汇注释和篇章精读。词条包含原文回填、搭配、必要辨析、外刊写作赏析和 IELTS 四档迁移判断；按证据提供替代用法、逻辑箭头图、竞争性解释和写作迁移。遵循 IELTS 分支，不套用高考专属语法填空/考点扫描模块。
 
-现有精读采用**有限引用教学版**，包含原创中文总结、表达解释、作者表达选择、IELTS 迁移分级与替代用法、原创语境例句、论证箭头图和竞争性解释；不是原 skill 的逐段全文双语版。原文另存 `original.txt`，来自用户明确指定的本地输入，保留标题、出版方、作者、期号和文章链接，不从额外付费墙获取全文。仅归档最终生成精读的最多10篇，不将整期期刊 PDF/EPUB 或全部候选上传。
+原输入每段赋予隐藏 `source:P001` 等标记。发布前逐段检查全部英文句子的连接序列与原输入完整一致（包括数值），段落数量/顺序无遗漏，英中句对齐，并检查每块四层结构与词条模块。校验结果、双语句对数量、原文段覆盖数量、PDF 页数写入元数据。旧节选缓存因模式/版本哈希不同而失效，不能作为完整精读复用；TypeSafe 筛选缓存保持有效。
+
+原文另存 `original.txt`，来自用户明确指定的本地输入，保留标题、出版方、作者、期号和文章链接；不从额外付费墙获取全文。仅归档最终生成精读的最多10篇，不上传整期期刊 PDF/EPUB 或全部候选。
+
+受信任进程执行安装 skill 的固定 `scripts/build.sh`，保留字形、六角色和字面星号门禁，导出真实 DOCX/PDF。独立审核读取完整讲义与原输入，审查全文覆盖、翻译含义、词汇/语域/论证教学，并抽查实际渲染的封面、词条/表格、内页和末页。记录生成及审核日志回执中的 model/effort，不公开 session ID、提示词或日志。未通过完整校验或审核的产物不发布。
 
 私有可见性不等于出版方转载授权。本流程只整理用户给定的本地输入及转换产物；未经授权内容不得复制到 public 仓库或添加协作者传播。源链接从 EPUB canonical、og:url 或明确来源导航提取并校验 HTTPS/出版方域名，无法明确对应的文章会记录并跳过，不猜URL；必要时用私有 `--source-links` JSON 补入经过验证的 `issueId/articleId -> URL` 映射。
 
-不合格草稿最多自动修复一次，独立审核失败时留在私有任务目录并记录，继续考虑下一篇推荐材料。每个日期范围最多40次 Codex 生成/审核预留，失败也计数；单次子任务25分钟、整轮4小时超时停止。内容、分析、规则及 skill 哈希参与指纹；通过审核的原文/讲义文件另有完整性哈希，重复执行复用缓存与审核结果。每篇通过后立即提交发布，后续中断不丢已完成产物。同一命令重跑可以续办，月度与周度共享筛选缓存。
+不合格草稿最多自动修复一次，独立审核失败时留在私有任务目录并记录，继续考虑下一篇推荐材料。每个日期范围最多40次 Codex 生成/审核预留，失败也计数；完整精读生成子任务45分钟、审核子任务25分钟、整轮4小时超时停止。内容、分析、规则及 skill 哈希参与指纹；通过审核的原文/讲义文件另有完整性哈希，重复执行复用缓存与审核结果。每篇通过后立即提交发布，后续中断不丢已完成产物。同一命令重跑可以续办，月度与周度共享筛选缓存。
 
 只白名单提交 `original.txt`、`guide.md`、`guide.docx`、`guide.pdf`、精简 `metadata.json` 及 README/INDEX，不使用 `git add .`，不上传本机路径、凭证、原项目无关文件或私有缓存日志。原 curator 项目的未提交工作不受影响。
 
