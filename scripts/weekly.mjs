@@ -283,6 +283,7 @@ async function main() {
         if (previous.contentHash === contentHash && previous.independentReview === 'approved' && previous.artifactHashes &&
             (await Promise.all(previous.artifacts.map(async f => previous.artifactHashes[f] === digest(await readFile(path.join(finalDir, f)))))).every(Boolean)) {
           report.guides.push({ issueId: t.issue.id, articleId: article.id, state: 'already-published' });
+          if (v.publish) await publish(repository, runDir, window.end);
           continue;
         }
       }
