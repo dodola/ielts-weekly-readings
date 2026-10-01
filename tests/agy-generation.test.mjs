@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { agyArgs, agyDraft, AGY_MODEL } from '../scripts/agy-generation.mjs';
+import { agyArgs, agyDraft, AGY_MODEL, parseAgyOutput } from '../scripts/agy-generation.mjs';
 
 test('agy generation pins the requested model and high effort without exposing source in argv or widening permissions', async () => {
   const jobDir = await mkdtemp(path.join(os.tmpdir(), 'agy-fixture-'));
@@ -36,4 +36,15 @@ test('agy generation pins the requested model and high effort without exposing s
     await assert.rejects(agyDraft({ jobDir, prompt, command: async () => JSON.stringify({ event: 'init', init: { model: 'other-model' } }) }), /differs/);
     await assert.rejects(agyDraft({ jobDir, prompt, command: async () => `${reply({ status: 'SUCCESS', response: 'synthetic' })}\n${JSON.stringify({ event: 'step_update', step_update: { step_type: 'tool_call' } })}` }), /invoked a tool/);
   } finally { await rm(jobDir, { recursive: true, force: true }); }
+});
+
+test('provider truncation error is reported accurately without treating it as a tool or accepting incomplete text', () => {
+  const prefix = [{ event: 'init', init: { model: AGY_MODEL } },
+    { event: 'step_update', step_update: { step_type: 'error_message', state: 'DONE' } }];
+  const output = [...prefix, { event: 'result', result: { status: 'ERROR', response: 'incomplete synthetic guide',
+    error: 'Your previous response was cut off because it exceeded the output token limit' } }].map(e => JSON.stringify(e)).join('\n');
+  assert.throws(() => parseAgyOutput(output), /output token limit/);
+  const success = [...prefix, { event: 'result', result: { status: 'SUCCESS', response: 'complete synthetic guide' } }].map(e => JSON.stringify(e)).join('\n');
+  assert.equal(parseAgyOutput(success).result.response, 'complete synthetic guide');
+  assert.throws(() => parseAgyOutput('invalid NDJSON'), /invalid NDJSON/);
 });

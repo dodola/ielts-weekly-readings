@@ -13,6 +13,7 @@ import { randomUUID } from 'node:crypto';
 import { PUBLICATIONS, PUBLICATION_NAMES, balancedSelection, publicationCounts } from './selection.mjs';
 import { embeddedPublisherLink, newYorkerContentsLinks } from './publisher-links.mjs';
 import { AGY_MODEL } from './agy-generation.mjs';
+import { READER_SCOPE, readerScope } from './reader-scope.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const HELP = `Usage: node scripts/weekly.mjs --project PATH --source PATH --output-repo PATH [--execute --publish]
@@ -213,6 +214,7 @@ async function main() {
       issuePlans: groups.map(g => ({ issueId: g.issue.id, articles: g.articles, cached: g.cached, plannedRequests: g.plannedRequests })),
       plannedRequests: groups.reduce((s, g) => s + g.plannedRequests, 0),
       selectionPolicy: 'balanced-publications-v1', publicationFilter, cachedOnly: Boolean(v['cached-only']),
+      readerScope: READER_SCOPE,
       status: tasks.length ? 'planned' : 'no-new-issues', guides: [],
     };
     await save(path.join(runDir, 'report.json'), report);
@@ -275,13 +277,19 @@ async function main() {
     report.selectedCount = selected.length;
     await save(path.join(runDir, 'report.json'), report);
     report.blockedArticles = [];
-    const eligible = [], datasets = new Map(), archives = new Map(), contents = new Map();
+    const eligible = [], readerEligible = [], datasets = new Map(), archives = new Map(), contents = new Map();
     const pending = [];
     for (const t of selected) {
       if (!datasets.has(t.issue.id)) datasets.set(t.issue.id, await json(path.join(cache, 'issues', `${t.issue.id}.json`)));
       const dataset = datasets.get(t.issue.id);
       const article = dataset.articles.find(a => a.id === t.article.id);
       if (!article) throw new Error('Selected source article missing from private cache.');
+      const scope = readerScope(article, t.analysis);
+      if (!scope.eligible) {
+        report.blockedArticles.push({ issueId: t.issue.id, articleId: article.id, title: article.title, reason: scope.reason });
+        continue;
+      }
+      readerEligible.push(t);
       if (!archives.has(t.issue.id)) archives.set(t.issue.id, new AdmZip(path.join(source, t.issue.sourceDirectory, t.issue.epubName)));
       const z = archives.get(t.issue.id);
       const entry = z.getEntry(article.sourceEntry);
@@ -319,10 +327,11 @@ async function main() {
     }
     const chosen = balancedSelection(eligible, maxGuides);
     report.publicationCounts = { candidates: publicationCounts(tasks), selected: publicationCounts(selected),
+      readerEligible: publicationCounts(readerEligible),
       linkedEligible: publicationCounts(eligible), chosen: publicationCounts(chosen) };
     report.missingPublications = (publicationFilter ?? PUBLICATIONS).filter(key => !report.publicationCounts.chosen[key])
       .map(key => ({ publicationKey: key, reason: !report.publicationCounts.candidates[key] ? 'no-issues-in-window' :
-        !report.publicationCounts.selected[key] ? 'no-selected-candidates' : !report.publicationCounts.linkedEligible[key] ? 'no-trusted-publisher-link' : 'guide-limit' }));
+        !report.publicationCounts.selected[key] ? 'no-selected-candidates' : !report.publicationCounts.readerEligible[key] ? 'no-general-interest-candidates' : !report.publicationCounts.linkedEligible[key] ? 'no-trusted-publisher-link' : 'guide-limit' }));
     await save(path.join(runDir, 'report.json'), report);
     console.log(`Balanced selection: ${JSON.stringify(report.publicationCounts.chosen)}; missing: ${JSON.stringify(report.missingPublications)}.`);
     for (const t of chosen) {
