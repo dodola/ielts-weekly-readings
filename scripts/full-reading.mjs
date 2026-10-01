@@ -71,7 +71,11 @@ export async function createFullGuide(options) {
   async function draft(extra = '', logName = 'full-generation.codex.log') {
     await reserve('codexReserved', 1, maxCodex);
     if (generator === 'agy') {
-      return agyDraft({ jobDir, prompt: `${prompt}\n${extra}\n${await preparedContext()}`, command,
+      const outputPrompt = prompt.replace('Directly WRITE guide.md in this directory', 'Return the complete guide.md Markdown text as your response')
+        .replace('Do not place the finished guide in your final response.', 'Your response must contain the entire finished guide, with no prefatory explanation or wrapping code fence.')
+        .replace(/Persist the skeleton first,[\s\S]*Return a short completion message only\./, 'This is a text-only transport: do not call any tools, access files, run shell commands, publish or request permissions. All required source and references are provided below. Return the COMPLETE skill-format guide in one response; trusted code writes it to disk and checks coverage and exports. Do not abbreviate content to fit an invented length limit.');
+      const previous = await exists(guide) ? `\n=== EXISTING INCOMPLETE DRAFT DATA, repair all omissions; return the whole complete guide ===\n${await readFile(guide, 'utf8')}\n=== END DRAFT ===` : '';
+      return agyDraft({ jobDir, prompt: `${outputPrompt}\n${extra}\n${await preparedContext()}${previous}`, command,
         binary: agy, safeEnv });
     }
     await command(codex, ['exec', '--model', 'gpt-6.1-sol', '--config', 'model_reasoning_effort="high"', '--ephemeral', '--sandbox', 'workspace-write', '--skip-git-repo-check',
