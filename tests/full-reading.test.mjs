@@ -102,3 +102,33 @@ test('default user policy skips independent review and PDF sampling but preserve
     assert.equal(result.review, undefined);
   } finally { await rm(jobDir, { recursive: true, force: true }); }
 });
+
+test('cold default generation uses Codex high and ignores stale AGY provenance', async () => {
+  const jobDir = await mkdtemp(path.join(os.tmpdir(), 'codex-default-'));
+  try {
+    const skill = path.join(jobDir, 'skill');
+    await mkdir(path.join(skill, 'references'), { recursive: true });
+    await mkdir(path.join(skill, 'scripts'));
+    for (const file of ['SKILL.md', 'references/method.md', 'references/template-ielts.md', 'references/ielts-targets.md', 'scripts/print_variant.py']) await writeFile(path.join(skill, file), 'complete reference fixture');
+    await writeFile(path.join(skill, 'references/template.md'), '六条硬性约束\n6. final constraint\n````markdown\ntextbook-only');
+    await writeFile(path.join(jobDir, 'source.json'), JSON.stringify({ article }));
+    await writeFile(path.join(jobDir, 'generation-provenance.json'), JSON.stringify({ model: 'stale-agy' }));
+    let calls = 0;
+    const result = await createFullGuide({ jobDir, article, skill, codex: 'codex', noDocuments: true,
+      safeEnv: {}, maxCodex: 40, reserve: async () => {},
+      command: async (binary, args, options) => {
+        calls++;
+        assert.equal(binary, 'codex');
+        assert.ok(args.includes('gpt-6.1-sol'));
+        assert.ok(args.includes('model_reasoning_effort="high"'));
+        assert.ok(options.input.includes(article.paragraphs[1]));
+        await writeFile(path.join(jobDir, 'guide.md'), markdown);
+        await writeFile(options.log, 'model: gpt-6.1-sol\nreasoning effort: high\n');
+      }, generate: async () => assert.fail('no independent review') });
+    assert.equal(calls, 1);
+    assert.equal(result.generation.model, 'gpt-6.1-sol');
+    assert.equal(result.generation.reasoningEffort, 'high');
+    assert.equal(result.coverage.fullEnglishSequenceMatched, true);
+    assert.equal(result.independentReview, 'disabled-by-user');
+  } finally { await rm(jobDir, { recursive: true, force: true }); }
+});

@@ -112,7 +112,7 @@ export async function createFullGuide(options) {
     artifactFiles.push('guide.docx', 'guide.pdf');
   }
   const provenance = async file => {
-    if (file === 'full-generation.codex.log' && await exists(path.join(jobDir, 'generation-provenance.json'))) {
+    if (generator === 'agy' && file === 'full-generation.codex.log' && await exists(path.join(jobDir, 'generation-provenance.json'))) {
       return JSON.parse(await readFile(path.join(jobDir, 'generation-provenance.json'), 'utf8'));
     }
     const log = await readFile(path.join(jobDir, file), 'utf8');

@@ -41,9 +41,13 @@ test('workflow stops on dirty/untrusted source and never executes or publishes o
     assert.match(r.stdout, /0 issues, 0 candidates/);
     const report = JSON.parse(await readFile(path.join(repo, '.private/runs/2026-09-25_2026-10-01/report.json')));
     assert.equal(report.limits.maxGuides, 10);
+    assert.equal(report.generator, 'codex');
     assert.equal(report.limits.typeSafeBudget, 'unlimited-by-user-instruction');
     assert.equal(report.refresh.refreshed, false);
     assert.equal(report.status, 'no-new-issues');
+    r = run(process.execPath, [...args, '--generator', 'unknown']);
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /Generator must be codex or agy/);
     r = run(process.execPath, [...args, '--execute', '--publish']);
     assert.equal(r.status, 1);
     assert.match(r.stderr, /restricted to dry-runs/);

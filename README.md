@@ -2,7 +2,7 @@
 
 本仓库保存周更流程代码。筛选后的本地原文及精读产物发布到用户明确指定的 **private** 仓库，公开代码库不保存文章产物。
 
-工作流复用 IELTS Reading Curator 的 EPUB 提取、TypeSafe Jev 判断、确定性筛选和缓存，再调用本机 `agy` 与已安装的 `intensive-reading` IELTS 分支自动生成讲解、Word、PDF。私有库首页直接列出文章标题、期号、出版方原文链接、筛选分数/主题/难度，以及原文和精读文件下载。
+工作流复用 IELTS Reading Curator 的 EPUB 提取、TypeSafe Jev 判断、确定性筛选和缓存，再调用本机 Codex（`gpt-6.1-sol/high`）与已安装的 `intensive-reading` IELTS 分支自动生成讲解、Word、PDF。私有库首页直接列出文章标题、期号、出版方原文链接、筛选分数/主题/难度，以及原文和精读文件下载。
 
 默认采用 `balanced-publications-v1`：先在有合格候选和可信来源链接的刊物中各取最佳文章，再在当前分配篇数最少的刊物中按质量选择下一篇。四刊均有足够合格文章时，10篇通常分为3/3/2/2；没有合格文章或可信链接的刊物明确标缺，不硬凑、不用过期文章补数。刊内按综合分、置信度、相同质量下较短篇幅、期号和稳定ID排序，消除输入顺序对同分结果的影响。每轮10篇总上限不变，历史成品累计保留；首页/索引列出各刊累计数量。
 
@@ -16,7 +16,7 @@
 
 ## 命令
 
-Node.js ≥22；原 curator 已安装依赖并配置 TypeSafe；`agy` 已有有效登录且 `agy models` 包含 `gemini-3.8-flash-high`；本机已安装 `intensive-reading`。导出需要 pandoc、LibreOffice/soffice、python3 及 skill 原有 Python 依赖、Poppler（pdftotext/pdfinfo/pdftoppm）和中文字体。Git/gh 使用用户既有授权登录。
+Node.js ≥22；原 curator 已安装依赖并配置 TypeSafe；Codex 已有有效登录且可使用 `gpt-6.1-sol`；本机已安装 `intensive-reading`。导出需要 pandoc、LibreOffice/soffice、python3 及 skill 原有 Python 依赖、Poppler（pdftotext/pdfinfo/pdftoppm）和中文字体。Git/gh 使用用户既有授权登录。
 
 ```bash
 # 更新确切来源目录并预览；不调用 AI、不发布
@@ -27,14 +27,14 @@ node scripts/weekly.mjs --project /path/to/ielts-reading-curator \
 node scripts/weekly.mjs --project /path/to/ielts-reading-curator \
   --source /path/to/awesome-english-ebooks \
   --output-repo /path/to/private-reading-library \
-  --repository dodola/ielts-reading-library --execute --publish --max-guides 10 --mode full-ielts --generator agy --generation-concurrency 2
+  --repository dodola/ielts-reading-library --execute --publish --max-guides 10 --mode full-ielts --generator codex --generation-concurrency 2
 
 # 月度试跑/补录：明确日期范围（最多31天）
 node scripts/weekly.mjs --project /path/to/ielts-reading-curator \
   --source /path/to/awesome-english-ebooks \
   --output-repo /path/to/private-reading-library \
   --repository dodola/ielts-reading-library \
-  --from 2026-09-01 --to 2026-09-30 --execute --publish --max-guides 10 --mode full-ielts --generator agy --generation-concurrency 2
+  --from 2026-09-01 --to 2026-09-30 --execute --publish --max-guides 10 --mode full-ielts --generator codex --generation-concurrency 2
 
 npm test
 node scripts/weekly.mjs --help
@@ -52,7 +52,7 @@ node scripts/weekly.mjs --help
 
 ## 完整 IELTS 精读与私有归档
 
-默认且唯一生成模式是 `full-ielts`，版本 `private-full-ielts-v1`。按用户最新模型选择，生成与修复由本机 `agy` 显式指定 `gemini-3.8-flash-high` / `high`，不可用时停止，不退回其他模型。此前成品的 `gpt-6.1-sol/high` 元数据保持原样。生成器直接按本机 `intensive-reading` 的完整 IELTS 模板分块写 `guide.md`，不使用稀疏 JSON 节选模板。原文全部保留，按句给出完整中文翻译；每个功能块含双语对照、表达清单、详尽词汇注释和篇章精读。词条包含原文回填、搭配、必要辨析、外刊写作赏析和 IELTS 四档迁移判断；按证据提供替代用法、逻辑箭头图、竞争性解释和写作迁移。遵循 IELTS 分支，不套用高考专属语法填空/考点扫描模块。
+默认且唯一生成模式是 `full-ielts`，版本 `private-full-ielts-v1`。按用户最新模型选择，生成与修复默认由本机 Codex 显式指定 `gpt-6.1-sol` / `high`，不可用时停止，不自动回退到 AGY 或其他模型。已有合格成品及其真实模型元数据保持原样。AGY 代码仅作为显式 `--generator agy` 的可选实现保留。生成器直接按本机 `intensive-reading` 的完整 IELTS 模板分块写 `guide.md`，不使用稀疏 JSON 节选模板。原文全部保留，按句给出完整中文翻译；每个功能块含双语对照、表达清单、详尽词汇注释和篇章精读。词条包含原文回填、搭配、必要辨析、外刊写作赏析和 IELTS 四档迁移判断；按证据提供替代用法、逻辑箭头图、竞争性解释和写作迁移。遵循 IELTS 分支，不套用高考专属语法填空/考点扫描模块。
 
 原输入每段赋予隐藏 `source:P001` 等标记。发布前逐段检查全部英文句子的连接序列与原输入完整一致（包括数值），段落数量/顺序无遗漏，英中句对齐，并检查每块四层结构与词条模块。校验结果、双语句对数量、原文段覆盖数量、PDF 页数写入元数据。旧节选缓存因模式/版本哈希不同而失效，不能作为完整精读复用；TypeSafe 筛选缓存保持有效。
 
@@ -66,9 +66,9 @@ node scripts/weekly.mjs --help
 
 全文结构校验不合格最多自动修复一次；仍不合格则停止并保留现场，可用同一命令续办。每个日期范围最多40次生成/修复预留（历史参数名 `--max-codex-calls` 保留兼容），失败也计数；完整精读生成子任务45分钟、整轮4小时超时停止。内容、分析、规则及 skill 哈希参与指纹；原文/讲义文件另有完整性哈希，重复执行复用有效缓存。源更新、生成、构建和发布日志另存阶段起止/时长JSON，供核对耗时。默认最多2篇独立文章生成并行，每个内容任务只分配一次；Word/PDF构建、成品写入及git提交/push分别串行。任何工作槽失败后不启动新文章，但让其他进行中任务完成并保留成果。每篇完成后立即提交发布，后续中断不丢已完成产物。同一命令重跑可以续办，月度与周度共享筛选缓存。
 
-生成预装完整 skill 的方法、IELTS 模板/靶子、六条共享排版约束、字形映射以及全部本地原文。引用文件保持原样，不做摘要；同轮两个工作槽共用一个参考快照。Codex旧路径先落骨架、按skill的约100–250行粒度分块落盘；新agy文本路径按功能块返回多个有界组件，由固定脚本合并后调用同一只读覆盖校验器。完整模板保留，不让模型重复读取参考、编写校验脚本或执行shell。完整内容要求及构建门禁不变，既有正式成品无需重做。
+生成预装完整 skill 的方法、IELTS 模板/靶子、六条共享排版约束、字形映射以及全部本地原文。引用文件保持原样，不做摘要；同轮两个工作槽共用一个参考快照。默认 Codex 路径先落骨架、按skill的约100–250行粒度分块落盘；可选 AGY 文本路径按功能块返回多个有界组件，由固定脚本合并后调用同一只读覆盖校验器。完整模板保留；Codex 可在工作目录写文件并运行固定校验器，但提示要求不重复读取参考或编写重复校验脚本。完整内容要求及构建门禁不变，既有正式成品无需重做。
 
-分段生成版本为`full-ielts-functional-parts-v1`：先规划1–10个按论证功能分组的块及每块5–8个原文中真实出现的表达，核对所有段落ID恰好覆盖且顺序一致；封面/导读和结语分开请求。每次双语原文最多3个完整段落、通常不超过400个源词（不切断原段落）；词汇每次最多3条完整词条；篇章精读逐块生成。每块仍有双语原文、表达清单、完整词汇注释和精读四层，不删模板内容。
+可选 AGY 的分段生成版本为`full-ielts-functional-parts-v1`：先规划1–10个按论证功能分组的块及每块5–8个原文中真实出现的表达，核对所有段落ID恰好覆盖且顺序一致；封面/导读和结语分开请求。每次双语原文最多3个完整段落、通常不超过400个源词（不切断原段落）；词汇每次最多3条完整词条；篇章精读逐块生成。每块仍有双语原文、表达清单、完整词汇注释和精读四层，不删模板内容。
 
 第一轮发送完整参考与全部原文，后续使用CLI实测可用的`--conversation`保持同一会话和术语；会话身份或模型改变时停止。每个返回文本本地上限30000字符，源段组/词条组发生输出token截断或超过本地上限时自动二分；单个段落或单条词汇仍失败则保留现场停止，不裁剪输出。此字符上限不是provider token参数；CLI没有设置token上限的已核实flag，因此不保证任意单项都能装入未知provider上限。每篇最多80次组件请求（含失败），每组件结构失败最多重试一次；原`--max-codex-calls`仍计整篇生成/修复启动，组件另有80次持久上限。
 
@@ -76,9 +76,9 @@ node scripts/weekly.mjs --help
 
 只白名单提交 `original.txt`、`guide.md`、`guide.docx`、`guide.pdf`、精简 `metadata.json` 及 README/INDEX，不使用 `git add .`，不上传本机路径、凭证、原项目无关文件或私有缓存日志。原 curator 项目的未提交工作不受影响。
 
-**切换验证状态（2026-10-01）：** `agy` 单次无文件测试已成功，CLI运行日志确认解析 `gemini-3.8-flash-high` 并使用 `daily-cloudcode-pa.googleapis.com` 的Google Code Assist接口。新生成提示与完整参考经stdin传入，argv不含文章内容。采用`plan + sandbox`，模型只返回完整Markdown，固定脚本写入job；输出事件中的真实工具或未知动作会被拒收；provider错误和续聊system_message属于被核实的被动事件，不误判为工具。合成stdin探针返回成功且工具调用为0，但CLI并未提供硬禁用全部工具的flag，因此不会把只输出文本宣称为工具级隔离。已收到转述的全文发送授权后重试一次，自动审批仍拒绝，理由是该转述不被认定为当前环境的直接用户授权；没有再重试或绕过，此前未取得Gemini完整成品。用户随后自行运行的Wired任务在约331秒退出，CLI返回ERROR：完整响应超过输出token上限；未发布。旧事件检查把`error_message`误标为工具动作，现已修正错误优先级并保持真实工具/未知动作拒收。日志中的ERROR内容不写入正式guide；现有草稿及原始NDJSON保留。现已接入有界分段方案并通过合成回归、真实Word/PDF导出及两轮合成会话复用验证；真实外刊端到端仍未完成，不能把331秒称作成功完整生成的耗时。Python/Julia已被新主题规则排除，不再作为补齐目标。以下周更命令已接入新后端，但首次完整端到端测试仍待此授权，不应标为验证完成。
+**当前默认（2026-10-01）：** 已按用户指示恢复 Codex `gpt-6.1-sol/high`。保留完整上下文预装、分块落盘、有效成品缓存、最多2篇并行及构建/发布串行；独立模型审核与PDF图片抽查维持关闭。AGY 的有界分段代码和合成测试保留，尚未取得真实外刊端到端成功结果，不作为默认或自动回退。其旧单响应实验曾因provider输出token上限失败，不能用失败耗时宣称加速。
 
-此前Codex冷生成诊断入口为 `node scripts/benchmark-full.mjs --baseline-job .private/jobs/<job-id> --name <unique-name>`。它只复制原输入，在全新 `.private/benchmarks/<name>` 生成完整 MD/DOCX/PDF；不调用 TypeSafe、不读取旧讲义当缓存、不修改或发布正式产物。阶段计时、工具调用数量、CLI报告的token数、输出字节和覆盖结果保存在私有 `summary.json`。独立审核现在按用户要求跳过，应单独列出这项流程减少，不能冒充生成提速。不同时间/负载和随机输出的一篇历史对照不能当作严格受控速度保证，token总数也不能冒充输入/输出/推理分项。该诊断入口是此前Codex基线；模型切换期间不要用它新启动Codex任务。默认2篇并行保持不变。
+Codex冷生成诊断入口为 `node scripts/benchmark-full.mjs --baseline-job .private/jobs/<job-id> --name <unique-name>`。它只复制原输入，在全新 `.private/benchmarks/<name>` 生成完整 MD/DOCX/PDF；不调用 TypeSafe、不读取旧讲义当缓存、不修改或发布正式产物。阶段计时、工具调用数量、CLI报告的token数、输出字节和覆盖结果保存在私有 `summary.json`。独立审核现在按用户要求跳过，应单独列出这项流程减少，不能冒充生成提速。不同时间/负载和随机输出的一篇历史对照不能当作严格受控速度保证，token总数也不能冒充输入/输出/推理分项。该诊断入口采用同一 Codex 完整模式，不改变或发布正式成品。默认2篇并行保持不变。
 
 ```text
 private-checkout/readings/<issue-id>/<article-id>/

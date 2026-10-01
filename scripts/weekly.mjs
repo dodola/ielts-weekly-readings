@@ -36,7 +36,7 @@ Default: refresh + private dry-run; no AI calls, no commit, no push.
 --no-documents        Generate Markdown only; still check full source coverage.
 --output-repo PATH     Separate PRIVATE Git checkout for original texts + guides.
 --mode full-ielts      Complete original + translation + IELTS skill template (default).
---generator agy       Existing agy CLI, gemini-3.8-flash-high, effort high (default).
+--generator codex     Codex gpt-6.1-sol/high (default); agy is an explicit optional backend.
 --repository OWNER/NAME  Expected PRIVATE remote (default dodola/ielts-reading-library).
 
 Generation reservations persist per date range, including failed attempts. TypeSafe
@@ -156,7 +156,8 @@ async function main() {
   } });
   if (v.help) { console.log(HELP); return; }
   if (v.mode && v.mode !== 'full-ielts') throw new Error('Only --mode full-ielts is supported; excerpt mode is disabled.');
-  if (v.generator && v.generator !== 'agy') throw new Error('Only the authorized agy generator is supported.');
+  if (v.generator && !['codex', 'agy'].includes(v.generator)) throw new Error('Generator must be codex or agy.');
+  const generator = v.generator ?? 'codex';
   if (!v.project || !v.source) throw new Error('--project and --source are required.');
   if (v.publish && !v.execute) throw new Error('--publish requires --execute.');
   if (v.offline && (v.execute || v.publish)) throw new Error('--offline is restricted to dry-runs.');
@@ -233,6 +234,7 @@ async function main() {
       issuePlans: groups.map(g => ({ issueId: g.issue.id, articles: g.articles, cached: g.cached, plannedRequests: g.plannedRequests })),
       plannedRequests: groups.reduce((s, g) => s + g.plannedRequests, 0),
       selectionPolicy: 'balanced-publications-v1', publicationFilter, cachedOnly: Boolean(v['cached-only']),
+      generator,
       readerScope: READER_SCOPE,
       status: tasks.length ? 'planned' : 'no-new-issues', guides: [],
     };
@@ -248,8 +250,10 @@ async function main() {
     }
     const codex = process.env.CODEX_BINARY || 'codex';
     const agy = process.env.AGY_BINARY || 'agy';
-    const models = await command(agy, ['models']);
-    if (!new RegExp(`(^|\\s)${AGY_MODEL}(\\s|$)`).test(models)) throw new Error('Requested agy model is unavailable; no fallback.');
+    if (generator === 'agy') {
+      const models = await command(agy, ['models']);
+      if (!models.split(/\s+/).includes(AGY_MODEL)) throw new Error('Requested agy model is unavailable; no fallback.');
+    } else await command(codex, ['--version']);
     if (!v['no-documents']) for (const dep of ['pandoc', 'soffice', 'python3', 'pdftotext', 'pdfinfo', 'pdftoppm']) {
       await command('which', [dep]);
     }
@@ -380,7 +384,7 @@ async function main() {
     await runBounded(pending, generationConcurrency, async ({ t, article, metadata, contentHash, jobDir, finalDir }, index) => {
       console.log(`Generating/reusing COMPLETE IELTS guide ${alreadyCompleted + index + 1}/${maxGuides}: ${article.title}…`);
       const full = await createFullGuide({ jobDir, article, skill, codex, safeEnv, command: guideCommand,
-        reserve, maxCodex, noDocuments: v['no-documents'], generator: 'agy', agy });
+        reserve, maxCodex, noDocuments: v['no-documents'], generator, agy });
       await completeSerial(async () => {
       const artifactFiles = [...full.artifactFiles];
       await mkdir(finalDir, { recursive: true });
