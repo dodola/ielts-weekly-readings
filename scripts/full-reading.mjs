@@ -3,6 +3,8 @@ import path from 'node:path';
 import { digest, auditSchema } from './notes.mjs';
 import { skillContext, inputContext } from './skill-context.mjs';
 import { fileURLToPath } from 'node:url';
+import { skillBuildScript } from './skill-export.mjs';
+import { agyDraft } from './agy-generation.mjs';
 
 export const FULL_POLICY = 'private-full-ielts-v1';
 const normalize = text => text.normalize('NFKC').replace(/[‘’]/g, "'")
@@ -49,7 +51,7 @@ export function validateFullGuide(markdown, article) {
 
 export async function createFullGuide(options) {
   const { jobDir, article, skill, codex, safeEnv, command, generate, reserve, maxCodex, noDocuments,
-    auditRepairAttempt = 0, independentReview = false } = options;
+    auditRepairAttempt = 0, independentReview = false, generator = 'codex', agy = 'agy' } = options;
   const guide = path.join(jobDir, 'guide.md');
   const sourceWithIds = { paragraphs: article.paragraphs.map((text, i) => ({ id: `P${String(i + 1).padStart(3, '0')}`, text })) };
   await writeFile(path.join(jobDir, 'paragraphs.json'), `${JSON.stringify(sourceWithIds, null, 2)}\n`, { mode: 0o600 });
@@ -68,6 +70,10 @@ export async function createFullGuide(options) {
     `No page/word limit: completeness matters. Persist the skeleton first, then write each block to disk in manageable chunks (about 100–250 lines per edit), as the skill requires. Keep the planned block boundaries and completed blocks in your working context; do not reread completed blocks between every edit unless repairing an actual issue. If an existing guide.md exists, inspect it and repair/continue rather than deleting completed content. Finish by self-checking the IELTS checklist and run the supplied validator ONCE after all blocks are complete: node ${JSON.stringify(validator)} --source source.json --guide guide.md. It checks original paragraph/order/English/paired-translation/module coverage; repair concrete failures and rerun only when needed. Do not write a duplicate coverage checker, build documents or perform PDF checks here; trusted code handles export afterwards. Return a short completion message only.`;
   async function draft(extra = '', logName = 'full-generation.codex.log') {
     await reserve('codexReserved', 1, maxCodex);
+    if (generator === 'agy') {
+      return agyDraft({ jobDir, prompt: `${prompt}\n${extra}\n${await preparedContext()}`, command,
+        binary: agy, safeEnv });
+    }
     await command(codex, ['exec', '--model', 'gpt-6.1-sol', '--config', 'model_reasoning_effort="high"', '--ephemeral', '--sandbox', 'workspace-write', '--skip-git-repo-check',
       '-C', jobDir, '--output-last-message', path.join(jobDir, 'generation-result.txt'), '-'],
       { cwd: jobDir, env: safeEnv, input: `${prompt}\n${extra}\n${await preparedContext()}`, timeout: 45 * 60000,
@@ -84,15 +90,16 @@ export async function createFullGuide(options) {
   let cachedBuild = await exists(buildState) ? JSON.parse(await readFile(buildState, 'utf8')) : null;
   const markdownHash = digest(markdown);
   let artifactFiles = ['guide.md']; const images = [];
-  let pages = null;
+  let pages = null, exportIntegrity;
   if (!noDocuments) {
     if (cachedBuild?.markdownHash !== markdownHash || !await exists(path.join(jobDir, 'guide.docx')) || !await exists(path.join(jobDir, 'guide.pdf'))) {
-      await command('bash', [path.join(skill, 'scripts/build.sh'), guide], { cwd: jobDir, env: safeEnv, timeout: 10 * 60000, log: path.join(jobDir, 'build.log') });
+      await command('bash', [await skillBuildScript(skill, jobDir, markdown), guide], { cwd: jobDir, env: safeEnv, timeout: 10 * 60000, log: path.join(jobDir, 'build.log') });
       await writeFile(buildState, JSON.stringify({ markdownHash }), { mode: 0o600 });
     }
     const info = await command('pdfinfo', [path.join(jobDir, 'guide.pdf')]);
     pages = Number(info.match(/^Pages:\s+(\d+)/m)?.[1]);
     if (!pages || !info.includes('A4')) throw new Error('Full guide must build to a valid A4 PDF.');
+    exportIntegrity = JSON.parse(await command('python3', [fileURLToPath(new URL('check-export.py', import.meta.url)), jobDir]));
     for (const page of independentReview ? [...new Set([1, Math.min(4, pages), Math.ceil(pages / 2), pages])] : []) {
       const prefix = path.join(jobDir, `full-qa-${page}`);
       await command('pdftoppm', ['-f', String(page), '-l', String(page), '-singlefile', '-scale-to', '1600', '-png', path.join(jobDir, 'guide.pdf'), prefix]);
@@ -101,11 +108,14 @@ export async function createFullGuide(options) {
     artifactFiles.push('guide.docx', 'guide.pdf');
   }
   const provenance = async file => {
+    if (file === 'full-generation.codex.log' && await exists(path.join(jobDir, 'generation-provenance.json'))) {
+      return JSON.parse(await readFile(path.join(jobDir, 'generation-provenance.json'), 'utf8'));
+    }
     const log = await readFile(path.join(jobDir, file), 'utf8');
     return { model: log.match(/^model:\s+(.+)$/m)?.[1] ?? 'unavailable',
       reasoningEffort: log.match(/^reasoning effort:\s+(.+)$/m)?.[1] ?? 'unavailable' };
   };
-  if (!independentReview) return { artifactFiles, coverage: { ...coverage, pdfPages: pages },
+  if (!independentReview) return { artifactFiles, coverage: { ...coverage, pdfPages: pages, exportIntegrity },
     generation: await provenance('full-generation.codex.log'), independentReview: 'disabled-by-user' };
   const auditHash = digest(markdown + (noDocuments ? 'md' : await readFile(path.join(jobDir, 'guide.pdf'))));
   const reviewPath = path.join(jobDir, 'full-review.json');
@@ -130,7 +140,7 @@ export async function createFullGuide(options) {
     return createFullGuide({ ...options, auditRepairAttempt: 1 });
   }
   if (!audit.approved) throw new Error('Independent full IELTS review rejected the guide after one repair; not published. Read private full-review.json.');
-  return { artifactFiles, coverage: { ...coverage, pdfPages: pages },
+  return { artifactFiles, coverage: { ...coverage, pdfPages: pages, exportIntegrity },
     independentReview: 'approved',
     generation: await provenance('full-generation.codex.log'), review: await provenance('full-audit.json.codex.log'),
     repair: await exists(path.join(jobDir, 'full-review-repair.codex.log')) ? await provenance('full-review-repair.codex.log') : undefined };

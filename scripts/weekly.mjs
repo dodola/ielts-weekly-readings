@@ -10,6 +10,9 @@ import { windowFor, issuesInWindow, sourceURL, digest, publicMetadata, assertPri
 import { FULL_POLICY, createFullGuide } from './full-reading.mjs';
 import { serialQueue, runBounded } from './concurrency.mjs';
 import { randomUUID } from 'node:crypto';
+import { PUBLICATIONS, PUBLICATION_NAMES, balancedSelection, publicationCounts } from './selection.mjs';
+import { embeddedPublisherLink, newYorkerContentsLinks } from './publisher-links.mjs';
+import { AGY_MODEL } from './agy-generation.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const HELP = `Usage: node scripts/weekly.mjs --project PATH --source PATH --output-repo PATH [--execute --publish]
@@ -23,6 +26,8 @@ Default: refresh + private dry-run; no AI calls, no commit, no push.
 --from YYYY-MM-DD --to YYYY-MM-DD  Explicit inclusive issue-date range (max 31 days).
 --max-articles N       Optional candidate cap; default covers all candidates.
 --max-guides N         Selected guide cap (default 10, maximum 10).
+--publications KEYS   Optional comma-separated publication subset for supplements.
+--cached-only         Refuse missing analyses; no new TypeSafe calls.
 --generation-concurrency N  Independent guide workers (default 2, maximum 2); Git is serial.
 --max-codex-calls N    Generation/repair reservations per date range (default 40).
 --skill-root PATH     Installed intensive-reading skill.
@@ -30,9 +35,10 @@ Default: refresh + private dry-run; no AI calls, no commit, no push.
 --no-documents        Generate Markdown only; still check full source coverage.
 --output-repo PATH     Separate PRIVATE Git checkout for original texts + guides.
 --mode full-ielts      Complete original + translation + IELTS skill template (default).
+--generator agy       Existing agy CLI, gemini-3.8-flash-high, effort high (default).
 --repository OWNER/NAME  Expected PRIVATE remote (default dodola/ielts-reading-library).
 
-Codex reservations persist per date range, including failed attempts. TypeSafe
+Generation reservations persist per date range, including failed attempts. TypeSafe
 has no monetary or logical-request cap, per user instruction. SDK may retry each
 logical request twice (up to 3 transport attempts). No auto-recharge or scheduling.
 `;
@@ -125,9 +131,12 @@ async function main() {
     'max-codex-calls': { type: 'string' }, 'generation-concurrency': { type: 'string' },
     'skill-root': { type: 'string' }, 'source-links': { type: 'string' },
     'no-documents': { type: 'boolean' }, repository: { type: 'string' }, 'output-repo': { type: 'string' }, mode: { type: 'string' },
+    publications: { type: 'string' }, 'cached-only': { type: 'boolean' },
+    generator: { type: 'string' },
   } });
   if (v.help) { console.log(HELP); return; }
   if (v.mode && v.mode !== 'full-ielts') throw new Error('Only --mode full-ielts is supported; excerpt mode is disabled.');
+  if (v.generator && v.generator !== 'agy') throw new Error('Only the authorized agy generator is supported.');
   if (!v.project || !v.source) throw new Error('--project and --source are required.');
   if (v.publish && !v.execute) throw new Error('--publish requires --execute.');
   if (v.offline && (v.execute || v.publish)) throw new Error('--offline is restricted to dry-runs.');
@@ -137,6 +146,8 @@ async function main() {
   const maxArticles = int(v['max-articles'], Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER), maxGuides = int(v['max-guides'], 10, 10);
   const maxCodex = int(v['max-codex-calls'], 40, 40);
   const generationConcurrency = int(v['generation-concurrency'], 2, 2);
+  const publicationFilter = v.publications ? [...new Set(v.publications.split(','))].sort() : null;
+  if (publicationFilter?.some(key => !PUBLICATIONS.includes(key))) throw new Error('Unknown --publications key.');
   const repository = v.repository ?? 'dodola/ielts-reading-library';
   outputRoot = path.resolve(v['output-repo'] ?? outputRoot);
   if (outputRoot === root) throw new Error('Artifact checkout must be separate from the public workflow code.');
@@ -153,7 +164,7 @@ async function main() {
     if (days < 1 || days > 31) throw new Error('Inclusive date range must contain 1–31 days.');
     window.start = v.from; window.end = v.to;
   }
-  const runDir = path.join(privateRoot, 'runs', `${window.start}_${window.end}`);
+  const runDir = path.join(privateRoot, 'runs', `${window.start}_${window.end}${publicationFilter ? `_${publicationFilter.join('-')}` : ''}`);
   await mkdir(runDir, { recursive: true, mode: 0o700 });
   const lockPath = path.join(privateRoot, 'weekly.lock');
   try { const lock = await open(lockPath, 'wx', 0o600); await lock.writeFile(String(process.pid)); await lock.close(); }
@@ -176,13 +187,14 @@ async function main() {
     const months = [...new Set([window.start.slice(0, 7), window.end.slice(0, 7)])];
     let allIssues = [];
     for (const month of months) allIssues.push(...JSON.parse(await call('list', ['--month', month, '--json'])).issues);
-    const issues = issuesInWindow(allIssues, window);
+    const issues = issuesInWindow(allIssues, window).filter(issue => !publicationFilter || publicationFilter.includes(issue.publicationKey));
     const tasks = [];
     const groups = [];
     for (const issue of issues) {
       const args = ['--publication', issue.publicationKey, '--issue', issue.issueDate,
         ...(v['max-articles'] ? ['--limit', String(maxArticles - tasks.length)] : [])];
       const plan = JSON.parse(await call('analyze', [...args, '--dry-run']));
+      if (v['cached-only'] && plan.plannedRequests > 0) throw new Error('Cached-only run found missing analyses; stopped before any TypeSafe call.');
       const rows = JSON.parse(await call('report', [...args, '--json'])).results;
       groups.push({ issue, args, plannedRequests: plan.plannedRequests, cached: plan.cached, articles: rows.length });
       for (const row of rows) {
@@ -200,6 +212,7 @@ async function main() {
         title: t.article.title, cached: t.cached })),
       issuePlans: groups.map(g => ({ issueId: g.issue.id, articles: g.articles, cached: g.cached, plannedRequests: g.plannedRequests })),
       plannedRequests: groups.reduce((s, g) => s + g.plannedRequests, 0),
+      selectionPolicy: 'balanced-publications-v1', publicationFilter, cachedOnly: Boolean(v['cached-only']),
       status: tasks.length ? 'planned' : 'no-new-issues', guides: [],
     };
     await save(path.join(runDir, 'report.json'), report);
@@ -213,7 +226,9 @@ async function main() {
       if (!await exists(path.join(skill, file))) throw new Error('Installed intensive-reading skill is incomplete.');
     }
     const codex = process.env.CODEX_BINARY || 'codex';
-    await command(codex, ['login', 'status']);
+    const agy = process.env.AGY_BINARY || 'agy';
+    const models = await command(agy, ['models']);
+    if (!new RegExp(`(^|\\s)${AGY_MODEL}(\\s|$)`).test(models)) throw new Error('Requested agy model is unavailable; no fallback.');
     if (!v['no-documents']) for (const dep of ['pandoc', 'soffice', 'python3', 'pdftotext', 'pdfinfo', 'pdftoppm']) {
       await command('which', [dep]);
     }
@@ -260,30 +275,59 @@ async function main() {
     report.selectedCount = selected.length;
     await save(path.join(runDir, 'report.json'), report);
     report.blockedArticles = [];
+    const eligible = [], datasets = new Map(), archives = new Map(), contents = new Map();
     const pending = [];
-    for (const t of selected.sort((a, b) => b.analysis.compositeScore - a.analysis.compositeScore)) {
-      if (report.guides.length + pending.length >= maxGuides) break;
-      const analysis = t.analysis;
-      const dataset = await json(path.join(cache, 'issues', `${t.issue.id}.json`));
+    for (const t of selected) {
+      if (!datasets.has(t.issue.id)) datasets.set(t.issue.id, await json(path.join(cache, 'issues', `${t.issue.id}.json`)));
+      const dataset = datasets.get(t.issue.id);
       const article = dataset.articles.find(a => a.id === t.article.id);
       if (!article) throw new Error('Selected source article missing from private cache.');
-      const z = new AdmZip(path.join(source, t.issue.sourceDirectory, t.issue.epubName));
+      if (!archives.has(t.issue.id)) archives.set(t.issue.id, new AdmZip(path.join(source, t.issue.sourceDirectory, t.issue.epubName)));
+      const z = archives.get(t.issue.id);
       const entry = z.getEntry(article.sourceEntry);
       if (!entry) throw new Error('Source EPUB article entry is missing.');
       const $ = cheerio.load(entry.getData().toString('utf8'));
       const supplied = sourceLinks[`${t.issue.id}/${article.id}`];
-      const links = [supplied, $('link[rel="canonical"]').attr('href'), $('meta[property="og:url"]').attr('content'),
-        ...$('.link_navbar a[href]').map((_, e) => $(e).attr('href')).get()]
-        .filter(Boolean).flatMap(url => { try { return [sourceURL(url, t.issue.publicationKey)]; } catch { return []; } });
-      const unique = [...new Set(links)];
-      if (unique.length !== 1) {
+      let link = embeddedPublisherLink($, t.issue.publicationKey, supplied);
+      if (!link && t.issue.publicationKey === 'new-yorker') {
+        if (!contents.has(t.issue.id)) {
+          const tocUrl = `https://www.newyorker.com/magazine/${t.issue.issueDate.replaceAll('-', '/')}`;
+          const saved = path.join(privateRoot, 'publisher-links', `${t.issue.id}.json`);
+          let snapshot = await exists(saved) ? await json(saved) : null;
+          if (snapshot?.sourceDigest !== dataset.issue.sourceDigest || snapshot?.tocUrl !== tocUrl) {
+            try {
+              const response = await fetch(tocUrl, { signal: AbortSignal.timeout(20000) });
+              if (!response.ok || response.url !== tocUrl) throw new Error('Official contents page failed or redirected.');
+              snapshot = { tocUrl, sourceDigest: dataset.issue.sourceDigest, verifiedAt: new Date().toISOString(),
+                articles: newYorkerContentsLinks(cheerio.load(await response.text()), t.issue, dataset.articles) };
+              await save(saved, snapshot);
+            } catch { snapshot = { articles: {}, lookupFailed: true }; }
+          }
+          contents.set(t.issue.id, snapshot);
+        }
+        const record = contents.get(t.issue.id).articles[article.id];
+        if (record?.title === article.title && record?.author === article.author) link = sourceURL(record.url, 'new-yorker');
+      }
+      if (!link) {
         report.blockedArticles.push({ issueId: t.issue.id, articleId: article.id,
           title: article.title, reason: 'missing-or-ambiguous-publisher-link' });
         console.log(`Publisher link unavailable: ${t.issue.id}/${article.id}; retained privately, considering the next selected article.`);
         await save(path.join(runDir, 'report.json'), report);
         continue;
       }
-      const metadata = { ...publicMetadata(article, t.issue, unique[0], analysis), mode: 'full-ielts', policy: FULL_POLICY };
+      eligible.push({ ...t, article, sourceUrl: link });
+    }
+    const chosen = balancedSelection(eligible, maxGuides);
+    report.publicationCounts = { candidates: publicationCounts(tasks), selected: publicationCounts(selected),
+      linkedEligible: publicationCounts(eligible), chosen: publicationCounts(chosen) };
+    report.missingPublications = (publicationFilter ?? PUBLICATIONS).filter(key => !report.publicationCounts.chosen[key])
+      .map(key => ({ publicationKey: key, reason: !report.publicationCounts.candidates[key] ? 'no-issues-in-window' :
+        !report.publicationCounts.selected[key] ? 'no-selected-candidates' : !report.publicationCounts.linkedEligible[key] ? 'no-trusted-publisher-link' : 'guide-limit' }));
+    await save(path.join(runDir, 'report.json'), report);
+    console.log(`Balanced selection: ${JSON.stringify(report.publicationCounts.chosen)}; missing: ${JSON.stringify(report.missingPublications)}.`);
+    for (const t of chosen) {
+      const { article, analysis } = t;
+      const metadata = { ...publicMetadata(article, t.issue, t.sourceUrl, analysis), mode: 'full-ielts', policy: FULL_POLICY };
       const contentHash = digest(JSON.stringify({ article, analysis, metadata, skillHash, policy: FULL_POLICY }));
       const jobDir = path.join(privateRoot, 'jobs', contentHash.slice(0, 24));
       await mkdir(jobDir, { recursive: true, mode: 0o700 });
@@ -302,13 +346,13 @@ async function main() {
     const completeSerial = serialQueue();
     let publicationDone = false;
     const buildSerial = serialQueue();
-    const guideCommand = (binary, args, options) => binary === 'bash' && args[0] === path.join(skill, 'scripts/build.sh')
+    const guideCommand = (binary, args, options) => binary === 'bash'
       ? buildSerial(() => command(binary, args, options)) : command(binary, args, options);
     const alreadyCompleted = report.guides.length;
     await runBounded(pending, generationConcurrency, async ({ t, article, metadata, contentHash, jobDir, finalDir }, index) => {
       console.log(`Generating/reusing COMPLETE IELTS guide ${alreadyCompleted + index + 1}/${maxGuides}: ${article.title}…`);
       const full = await createFullGuide({ jobDir, article, skill, codex, safeEnv, command: guideCommand,
-        reserve, maxCodex, noDocuments: v['no-documents'] });
+        reserve, maxCodex, noDocuments: v['no-documents'], generator: 'agy', agy });
       await completeSerial(async () => {
       const artifactFiles = [...full.artifactFiles];
       await mkdir(finalDir, { recursive: true });
@@ -336,6 +380,7 @@ async function publish(repository, runDir, runDate) {
   await assertPrivateRepository(repository);
   // Publish only trusted allowlisted artifacts; never git add . or cache/logs.
   const paths = [];
+  const archiveCounts = Object.fromEntries(PUBLICATIONS.map(key => [key, 0]));
   const index = ['# IELTS Reading Library', '', '用户指定本地外刊输入的个人私有阅读库。原文单独保存，精读完整覆盖原文并逐句双语讲解；不代表出版方转载授权。', '',
     '| 文章与期号 | 出版方原文 | 筛选理由 | 本地原文 | 精读 | Word | PDF |',
     '| --- | --- | --- | --- | --- | --- | --- |'];
@@ -345,6 +390,8 @@ async function publish(repository, runDir, runDate) {
       safeId(article);
       const dir = path.join(publicRoot, issue, article), meta = await json(path.join(dir, 'metadata.json'));
       if (meta.mode !== 'full-ielts') continue; // Legacy excerpts are never indexed as full guides.
+      const publicationKey = PUBLICATIONS.find(key => PUBLICATION_NAMES[key] === meta.publication);
+      if (publicationKey) archiveCounts[publicationKey]++;
       if (!['approved', 'disabled-by-user'].includes(meta.independentReview) || meta.coverage?.fullEnglishSequenceMatched !== true) {
         throw new Error('Full IELTS metadata lacks an explicit review policy or complete English coverage.');
       }
@@ -364,6 +411,7 @@ async function publish(repository, runDir, runDate) {
       index.push(`| ${meta.issueDate} · ${meta.publication} · ${meta.title.replace(/[\[\]\n|]/g, '')} | [原文链接](${meta.sourceUrl}) | 推荐；综合分 ${meta.compositeScore}；置信度 ${(meta.confidence * 100).toFixed(0)}%；${meta.topic} / ${meta.difficulty} | [原文](${rel}/original.txt) | [MD](${rel}/guide.md) | ${meta.artifacts.includes('guide.docx') ? `[DOCX](${rel}/guide.docx)` : '—'} | ${meta.artifacts.includes('guide.pdf') ? `[PDF](${rel}/guide.pdf)` : '—'} |`);
     }
   }
+  index.splice(4, 0, '累计完整精读（历史成品保留；每轮最多10篇）：' + PUBLICATIONS.map(key => `${PUBLICATION_NAMES[key]} ${archiveCounts[key]}篇`).join(' · '), '');
   await save(path.join(outputRoot, 'INDEX.md'), `${index.join('\n')}\n`);
   await save(path.join(outputRoot, 'README.md'), `${index.join('\n')}\n\n流程代码及运行说明：[ielts-weekly-readings](https://github.com/dodola/ielts-weekly-readings)。本库不新增协作者。\n`);
   paths.push('INDEX.md', 'README.md');
