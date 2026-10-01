@@ -19,7 +19,7 @@ test('workflow stops on dirty/untrusted source and never executes or publishes o
     await mkdir(path.join(repo, 'scripts'), { recursive: true });
     await mkdir(path.join(project, 'bin'), { recursive: true });
     await mkdir(source);
-    for (const f of ['weekly.mjs', 'notes.mjs', 'full-reading.mjs', 'concurrency.mjs', 'skill-context.mjs', 'validate-guide.mjs', 'selection.mjs', 'publisher-links.mjs', 'skill-export.mjs', 'check-export.py', 'agy-generation.mjs', 'reader-scope.mjs']) await copyFile(path.join(original, 'scripts', f), path.join(repo, 'scripts', f));
+    for (const f of ['weekly.mjs', 'notes.mjs', 'full-reading.mjs', 'concurrency.mjs', 'skill-context.mjs', 'validate-guide.mjs', 'selection.mjs', 'publisher-links.mjs', 'skill-export.mjs', 'check-export.py', 'agy-generation.mjs', 'reader-scope.mjs', 'agy-chunks.mjs']) await copyFile(path.join(original, 'scripts', f), path.join(repo, 'scripts', f));
     // This mock cannot make an API call: it only returns an empty issue catalog.
     await writeFile(path.join(project, 'bin/ielts-curator.mjs'), 'process.stdout.write(JSON.stringify({issues:[]}));');
     const git = (...args) => {

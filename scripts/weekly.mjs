@@ -61,25 +61,44 @@ async function save(p, value) {
   await writeFile(temporary, typeof value === 'string' ? value : `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
   await rename(temporary, p);
 }
-async function command(binary, args, { cwd = root, env = process.env, input, timeout = 120000, log } = {}) {
+async function command(binary, args, { cwd = root, env = process.env, input, timeout = 120000, log, progressLabel } = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(binary, args, { cwd, env, detached: true, stdio: ['pipe', 'pipe', 'pipe'] });
     active.add(child);
     const startedAt = new Date();
     let out = '', err = '', ended = false;
+    let pendingLines = '', generatedCharacters = 0;
+    const progressTimer = progressLabel ? setInterval(() => {
+      console.log(`IELTS part ${progressLabel}: ${Math.round((Date.now() - startedAt) / 1000)}s elapsed; ${generatedCharacters} response characters received.`);
+    }, 15000) : null;
     const timer = setTimeout(() => {
+      clearInterval(progressTimer);
       ended = true;
       try { process.kill(-child.pid, 'SIGTERM'); } catch {}
       setTimeout(() => { try { process.kill(-child.pid, 'SIGKILL'); } catch {} }, 3000).unref();
       reject(new Error(`${path.basename(binary)} timed out; private intermediate files retained.`));
     }, timeout);
-    child.on('error', e => { clearTimeout(timer); active.delete(child); reject(e); });
-    child.stdout.on('data', b => { out += b; });
+    child.on('error', e => { clearTimeout(timer); clearInterval(progressTimer); active.delete(child); reject(e); });
+    child.stdout.setEncoding('utf8'); child.stderr.setEncoding('utf8');
+    child.stdout.on('data', b => {
+      out += b;
+      if (!progressLabel) return;
+      pendingLines += b;
+      const lines = pendingLines.split('\n'); pendingLines = lines.pop();
+      for (const line of lines) {
+        try {
+          const event = JSON.parse(line);
+          if (event.event === 'step_update' && event.step_update?.step_type === 'agent_response') {
+            generatedCharacters += event.step_update.text_delta?.length ?? 0;
+          }
+        } catch { /* Invalid output remains subject to the final strict parser. */ }
+      }
+    });
     child.stderr.on('data', b => { err += b; });
     child.stdin.on('error', () => {});
     child.stdin.end(input);
     child.on('close', async code => {
-      clearTimeout(timer); active.delete(child);
+      clearTimeout(timer); clearInterval(progressTimer); active.delete(child);
       if (log) {
         await save(log, `${out}\n${err}`).catch(() => {});
         const finishedAt = new Date();

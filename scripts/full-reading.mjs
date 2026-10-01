@@ -4,7 +4,7 @@ import { digest, auditSchema } from './notes.mjs';
 import { skillContext, inputContext } from './skill-context.mjs';
 import { fileURLToPath } from 'node:url';
 import { skillBuildScript } from './skill-export.mjs';
-import { agyDraft } from './agy-generation.mjs';
+import { agyChunkedGuide } from './agy-chunks.mjs';
 
 export const FULL_POLICY = 'private-full-ielts-v1';
 const normalize = text => text.normalize('NFKC').replace(/[‘’]/g, "'")
@@ -75,8 +75,8 @@ export async function createFullGuide(options) {
         .replace('Do not place the finished guide in your final response.', 'Your response must contain the entire finished guide, with no prefatory explanation or wrapping code fence.')
         .replace(/Persist the skeleton first,[\s\S]*Return a short completion message only\./, 'This is a text-only transport: do not call any tools, access files, run shell commands, publish or request permissions. All required source and references are provided below. Return the COMPLETE skill-format guide in one response; trusted code writes it to disk and checks coverage and exports. Do not abbreviate content to fit an invented length limit.');
       const previous = await exists(guide) ? `\n=== EXISTING INCOMPLETE DRAFT DATA, repair all omissions; return the whole complete guide ===\n${await readFile(guide, 'utf8')}\n=== END DRAFT ===` : '';
-      return agyDraft({ jobDir, prompt: `${outputPrompt}\n${extra}\n${await preparedContext()}${previous}`, command,
-        binary: agy, safeEnv });
+      return agyChunkedGuide({ jobDir, article, prompt: `${outputPrompt}\n${extra}\n${await preparedContext()}${previous}`, command,
+        binary: agy, safeEnv, validateGuide: text => validateFullGuide(text, article) });
     }
     await command(codex, ['exec', '--model', 'gpt-6.1-sol', '--config', 'model_reasoning_effort="high"', '--ephemeral', '--sandbox', 'workspace-write', '--skip-git-repo-check',
       '-C', jobDir, '--output-last-message', path.join(jobDir, 'generation-result.txt'), '-'],

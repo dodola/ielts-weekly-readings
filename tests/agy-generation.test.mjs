@@ -48,3 +48,19 @@ test('provider truncation error is reported accurately without treating it as a 
   assert.equal(parseAgyOutput(success).result.response, 'complete synthetic guide');
   assert.throws(() => parseAgyOutput('invalid NDJSON'), /invalid NDJSON/);
 });
+
+test('sanitized real event shape preserves the actual output-limit error', async () => {
+  const fixture = await readFile(new URL('./fixtures/agy-output-limit.ndjson', import.meta.url), 'utf8');
+  assert.throws(() => parseAgyOutput(fixture), /output token limit/);
+});
+
+test('resuming a conversation allows passive system metadata while still rejecting real or unknown actions', () => {
+  const events = [{ event: 'init', init: { model: AGY_MODEL } },
+    { event: 'step_update', step_update: { step_index: 3, state: 'DONE', step_type: 'system_message', duration_seconds: 0.00007 } },
+    { event: 'result', result: { status: 'SUCCESS', response: 'synthetic remembered token' } }];
+  const encode = es => es.map(e => JSON.stringify(e)).join('\n');
+  assert.equal(parseAgyOutput(encode(events)).result.status, 'SUCCESS');
+  for (const step_type of ['run_command', 'write_to_file', 'tool_call', 'unknown_action']) {
+    assert.throws(() => parseAgyOutput(encode([...events, { event: 'step_update', step_update: { step_type } }])), /tool or other action/);
+  }
+});

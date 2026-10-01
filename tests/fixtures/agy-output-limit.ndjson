@@ -1,0 +1,5 @@
+{"event":"init","conversation_id":"00000000-0000-0000-0000-000000000001","init":{"model":"gemini-3.8-flash-high","permission_mode":"request-review"}}
+{"event":"step_update","step_update":{"step_index":0,"state":"DONE","step_type":"user_input"}}
+{"event":"step_update","step_update":{"step_index":1,"state":"DONE","step_type":"agent_response","text_delta":"[synthetic incomplete text]"}}
+{"event":"step_update","step_update":{"step_index":2,"state":"DONE","step_type":"error_message","duration_seconds":0}}
+{"event":"result","result":{"status":"ERROR","response":"[synthetic incomplete text]","error":"Your previous response was cut off because it exceeded the output token limit\nPlease continue from where you left off, keeping your response shorter\nRetries remaining: 3","duration_seconds":325.535075509,"num_turns":1}}
